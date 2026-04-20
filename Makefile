@@ -20,11 +20,11 @@ DEV_API_KEY ?= dev-key-do-not-use-in-production-0000000000000000
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test bench lint docker run
+.PHONY: help build test bench lint docker run release-check
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; print "Vocab Veto — make targets\n"} \
-	      /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-8s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	      /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "  CONTAINER=$(CONTAINER) (override with CONTAINER=docker)"
 
@@ -56,3 +56,11 @@ docker: ## Build the container image (rootless podman; see footer for override),
 
 run: ## Run locally via cargo run with a dev-only BWS_API_KEYS
 	BWS_API_KEYS="$(DEV_API_KEY)" $(CARGO) run --release --locked
+
+release-check: lint test bench docker ## Full pre-tag gate: lint, test, bench-compile, container image
+	@echo ""
+	@echo "release-check OK"
+	@echo "  image: $(IMAGE_NAME):$(LIST_SHA)"
+	@echo "  revision: $(REVISION)"
+	@echo ""
+	@echo "Next: follow RELEASE.md to capture a load-test report, tag v1.0.0, and push the image."

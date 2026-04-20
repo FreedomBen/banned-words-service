@@ -23,7 +23,8 @@
       "Bash(cargo add *)",
       "Bash(xargs -I{} grep -l AppState {})",
       "Bash(make help *)",
-      "Bash(make *)"
+      "Bash(make *)",
+      "Bash(bash -n scripts/load-test.sh)"
     ]
   }
 }
