@@ -120,8 +120,9 @@ Notes on the split:
    DEFAULT_MODE, NormalizeError, MAX_NORMALIZED_BYTES, LIST_VERSION};`
    (the `matcher` module is already `pub`, so these are shorthand for
    callers, not a visibility widening) and `pub use model::*;` for the
-   request/response DTOs. Anything already re-exported for the
-   integration tests stays as it is. No behavior change for `main.rs`.
+   request/response DTOs. Existing re-exports are left in place — this
+   change is additive only, so `main.rs` and the server integration
+   suite are unaffected.
 2. Add to `Cargo.toml`:
    ```toml
    [[bin]]
@@ -146,8 +147,10 @@ Notes on the split:
    fn main() -> std::process::ExitCode { cli::run() }
    ```
 5. Unit tests in `src/cli.rs` covering clap's generated parser: each
-   subcommand parses; unknown subcommand errors; conflicting input
-   flags on `check` (`--text` + `--file`) error before dispatch.
+   subcommand parses; unknown subcommand errors; the full mutex set on
+   `check` errors before dispatch — `--text` + `--file`, `--text` +
+   `--stdin`, `--file` + `--stdin`, and `--json-input` + any of
+   `--text` / `--file` / `--stdin` / `--lang` / `--mode`.
 
 **Exit criteria.** `cargo build --release --bin vv` green;
 `./target/release/vv --help` lists all three subcommands; `cargo test
@@ -173,9 +176,16 @@ server runs and writes the same JSON body to stdout.
      ASCII-lowercase, reject empty entries (exit 2), deduplicate. An
      unknown code exits 2 with a stderr message listing the compiled
      codes (same phrasing as the server's `UnknownLangsError`).
-     Omitted ⇒ scan every compiled language alphabetically, matching
-     the server default. An empty list after parsing is rejected with
-     exit 2 (the CLI analog of the server's `422 empty_langs`).
+     **Ordering** is preserved: repeated flags appear in invocation
+     order, and within a single occurrence comma-separated entries
+     expand left-to-right. This is the order echoed into match
+     concatenation, matching the server's preservation of `langs[]`
+     order. Omitted ⇒ scan every compiled language alphabetically,
+     matching the server default. An empty list after parsing is
+     rejected with exit 2 (the CLI analog of the server's `422
+     empty_langs`); this state is only reachable via `--json-input`
+     carrying `{"langs": []}` — the argv path can't produce it because
+     an omitted `--lang` defaults to "scan every compiled language."
    - `--mode <strict|substring>` — the `mode` field. Omitted ⇒
      per-language default from `DEFAULT_MODE`, same as the server.
    - `--json-input <PATH>` — alternative to the individual flags: parse
@@ -183,7 +193,15 @@ server runs and writes the same JSON body to stdout.
      exactly the shape the server accepts. Unknown fields including
      `overrides` are silently ignored, matching the server's
      forward-compat stance. Mutually exclusive with `--text`/`--file`/
-     `--stdin`/`--lang`/`--mode`.
+     `--stdin`/`--lang`/`--mode`. The DTO mirrors the server's M3
+     shape — `mode` typed as `Option<String>` so an unrecognized value
+     reaches handler-side validation instead of aborting at serde.
+     Malformed JSON surfaces a stderr message of the form `"invalid
+     JSON: ..."`; an otherwise-valid body with a bad field produces a
+     matching message (`"invalid mode: ..."`, `"unknown language: ..."`,
+     `"empty text"`, `"empty langs"`). All collapse to exit 2 per CM4,
+     but the stderr distinction preserves parity with the server's
+     400/422 rows.
 2. Dispatch calls `Engine::scan(text, &scan_langs, mode)` directly.
    `Engine::scan` normalizes the raw text internally and returns
    `Result<ScanResult, NormalizeError>`, matching the pipeline
@@ -243,7 +261,9 @@ whitespace).
    default_mode}` objects for every compiled language. Reuses
    `model::LanguagesResponse` directly. Exit 0.
 2. `vv version` emits a small JSON object: `{"crate_version": "<from
-   CARGO_PKG_VERSION>", "list_version": "<LDNOOBW SHA>"}`. Rationale:
+   CARGO_PKG_VERSION>", "list_version": "<LDNOOBW SHA>", "languages":
+   <N>}`. Shape matches `/readyz` minus the `ready` field (always true
+   for a local binary — if the binary ran, the engine built). Rationale:
    the server surfaces `list_version` via `X-List-Version` and `/readyz`;
    the CLI has no HTTP response to hang it on, so it gets its own
    subcommand. Exit 0. A plain `vv --version` (clap's built-in) still
@@ -278,7 +298,7 @@ humans can read the output without `jq`.
    design, per the mirror-table caveat); callers who need the per-lang
    mode echo should use `--output json`. Plain output for other
    subcommands: `languages` emits one `<code>\t<default_mode>` row per
-   language; `version` emits `<crate_version>\t<list_version>`.
+   language; `version` emits `<crate_version>\t<list_version>\t<languages>`.
 2. Exit-code table, published in `vv check --help`:
 
    | Exit | Meaning                             | Corresponds to server |
@@ -289,6 +309,7 @@ humans can read the output without `jq`.
    | `3`  | input too large (post-normalization) | 413 `payload_too_large` via `NormalizeError::TooLarge` |
    | `64` | I/O error — file unreadable, stdin closed early, or input bytes are not valid UTF-8 | no server equivalent — CLI-specific |
    | `70` | internal error (should not happen)  | 500 `internal` |
+   | —    | unreachable in the CLI              | 503 `overloaded` — the CLI has no in-flight gate, so the condition cannot arise |
 
    The collapse of 400/422 into a single `2` is deliberate: users
    interpret CLI exit codes coarsely, and stderr carries the specific
@@ -299,6 +320,9 @@ humans can read the output without `jq`.
    stderr: input length, normalized length, mode resolution, per-lang
    match counts. No `tracing_subscriber` dependency — this is direct
    `eprintln!` with a consistent prefix. Metrics parity is not a goal.
+   Stream split is fixed: stdout carries only the normal output (JSON
+   or plain per `--output`); `-v` lines always go to stderr regardless
+   of `--output`, so `vv check | jq` is unaffected by verbosity.
 4. Integration tests cover every exit-code row with a triggering
    invocation, plus plain-output parity against hand-asserted bytes.
 
@@ -313,9 +337,13 @@ runs, with no dynamic linkage.
 1. `Makefile` targets:
    - `make vv` — `cargo build --release --bin vv --locked`.
    - `make vv-static` — `cargo build --release --bin vv --locked
-     --target x86_64-unknown-linux-musl`. Relies on the musl toolchain
-     already present in the cargo-chef stage of `deploy/Containerfile`;
-     document it in `make help`.
+     --target x86_64-unknown-linux-musl`. Host prerequisite: `rustup
+     target add x86_64-unknown-linux-musl` plus a musl linker
+     (`musl-tools` on Debian/Ubuntu, `musl-gcc` on Fedora). `make help`
+     documents the one-shot setup. This is a host build, independent
+     of `deploy/Containerfile`'s cargo-chef builder — the container
+     uses the same target internally but its toolchain is not reused
+     by the host target.
    - `make install` — install both `banned-words-service` and `vv` to
      `$(PREFIX)/bin` (default `/usr/local/bin` per the global PREFIX
      convention). No `install` target exists in the Makefile today
@@ -338,8 +366,11 @@ runs, with no dynamic linkage.
    The existing Makefile-targets table in the README gets the new rows.
 4. RELEASE.md is amended to mention that the `v1.0.0` tag now ships two
    binaries: the server and `vv`. The reproducibility double-build and
-   list-version sanity check apply to both. `vv` appears as a second
-   release asset on the GitHub release page.
+   list-version sanity check apply to both. A CI job triggered on
+   `v*` tag pushes builds the musl `vv` binary (via `make vv-static`)
+   and uploads it as a GitHub release asset alongside the server
+   container image digest; RELEASE.md codifies the manual verify step
+   (`./vv version` against the expected LDNOOBW SHA).
 
 **Exit criteria.** `ldd ./target/x86_64-unknown-linux-musl/release/vv`
 prints "not a dynamic executable"; `./vv check --text "..." --lang en`
