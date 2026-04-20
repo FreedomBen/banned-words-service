@@ -59,14 +59,14 @@ banned-words-service/
 1. `cargo init --bin`; commit `Cargo.toml` skeleton, workspace-free.
 2. Add submodule: `git submodule add https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words vendor/ldnoobw`; pin to `5faf2ba42d7b1c0977169ec3611df25a3c08eb13` (LDNOOBW default-branch HEAD as of scaffold) and surface the SHA as `LIST_VERSION` in the generated terms file. Re-pinning later is a deliberate, release-worthy act — not routine maintenance.
 3. `build.rs`:
-   - Walk `vendor/ldnoobw/`. Every file there must fall into exactly one of two disjoint sets: the **language allowlist** — the 27 codes keyed in `DEFAULT_MODE` (see M3 item 4), each producing a term table — or the **explicit skip list** — `fr-CA-u-sd-caqc` (regional variant redundant with `fr`; the only BCP-47-tagged file at the pinned SHA) plus non-language files (`README.md`, `LICENSE`, `CODE_OF_CONDUCT.md`). Fail the build if any file matches neither set, or if an allowlisted code has no file — catches LDNOOBW drift and forces an explicit default-mode decision for any new language.
+   - Walk `vendor/ldnoobw/`. Every file there must fall into exactly one of two disjoint sets: the **language allowlist** — the 27 codes keyed in `DEFAULT_MODE` (see M3 item 4), each producing a term table — or the **explicit skip list** — `fr-CA-u-sd-caqc` (regional variant redundant with `fr`; the only BCP-47-tagged file at the pinned SHA) plus non-language files (`README.md`, `LICENSE`, `USERS.md`). Fail the build if any file matches neither set, or if an allowlisted code has no file — catches LDNOOBW drift and forces an explicit default-mode decision for any new language.
    - Emit the generated file to `$OUT_DIR/generated_terms.rs` (pulled in from `src/matcher/mod.rs` via `include!`). Never write into the source tree — that dirties the working copy, races cargo's rerun detection, and breaks the reproducible-build claim in M9. The file contains:
      - `pub const LIST_VERSION: &str = "<SHA>";`
      - `pub static TERMS: phf::Map<&'static str, &'static [&'static str]>` keyed by lowercase ISO code.
    - Emit `cargo:rerun-if-changed=vendor/ldnoobw` and `cargo:rerun-if-changed=.git/modules/vendor/ldnoobw/HEAD` so a submodule pin change actually triggers rerun.
 4. Hello-world `main.rs` that prints `LIST_VERSION` and term counts per language. Smoke-test: `cargo run` prints something plausible.
 
-**Exit criteria.** `cargo build` green; `LIST_VERSION == "5faf2ba42d7b1c0977169ec3611df25a3c08eb13"`; term counts sum to the expected ~5k.
+**Exit criteria.** `cargo build` green; `LIST_VERSION == "5faf2ba42d7b1c0977169ec3611df25a3c08eb13"`; term counts sum to 2656 across 27 languages (the actual total at the pinned SHA, after whitespace-trim and empty-line skip).
 
 ## Milestone 2 — Matching core (library)
 

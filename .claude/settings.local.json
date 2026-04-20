@@ -3,7 +3,14 @@
     "allow": [
       "Bash(git ls-remote *)",
       "Bash(git -C /home/ben/gitclone/banned-words-service add README.md)",
-      "Bash(git -C /home/ben/gitclone/banned-words-service commit -m \"Add README with project overview and LDNOOBW attribution\")"
+      "Bash(git -C /home/ben/gitclone/banned-words-service commit -m \"Add README with project overview and LDNOOBW attribution\")",
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(git -C /home/ben/gitclone/banned-words-service status --short)",
+      "Bash(cargo init *)",
+      "Bash(git submodule *)",
+      "Bash(cargo build *)",
+      "Bash(cargo run *)"
     ]
   }
 }
