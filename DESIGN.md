@@ -147,6 +147,7 @@ Error response (4xx):
 | `bws_input_bytes`              | histogram | —                        | Distribution of `text` lengths in bytes; detects outlier traffic.        |
 | `bws_list_version_info`        | gauge     | `list_version`           | Constant 1; lets dashboards and alerts pivot on list version across a pod fleet. Label value is the same LDNOOBW commit SHA surfaced in `X-List-Version` and `/readyz`. |
 | `bws_languages_loaded`         | gauge     | —                        | Count of automatons live after startup; sanity check for `BWS_LANGS`.    |
+| `bws_inflight`                 | gauge     | —                        | Current in-flight `/v1/check` request count (counts against `BWS_MAX_INFLIGHT`). Lets dashboards answer "how close are we to the cap?" without inferring it from 503 rates. |
 
 Histogram buckets default to the `axum-prometheus` preset tuned for sub-millisecond latency; override via env for deployments with different SLO targets.
 
