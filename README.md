@@ -12,11 +12,12 @@ the binary's stable identity and is unchanged.
 Under active development. See [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)
 for the milestone-by-milestone status. Authoritative documents:
 
-| Document                                             | Purpose                                                                                          |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| [DESIGN.md](./DESIGN.md)                             | Behavior spec, API surface, error table, metrics contract, threat model, deployment posture.    |
-| [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)   | Milestone-ordered plan with explicit exit criteria per milestone.                                |
-| [CLAUDE.md](./CLAUDE.md)                             | Agent-facing working notes and cross-cutting invariants.                                         |
+| Document                                             | Purpose                                                                                       |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| [DESIGN.md](./DESIGN.md)                             | Behavior spec, API surface, error table, metrics contract, threat model, deployment posture. |
+| [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)   | Milestone-ordered plan with explicit exit criteria per milestone.                             |
+| [RELEASE.md](./RELEASE.md)                           | Human-owned release procedure: pre-tag gate, reproducibility check, load-test, tag and push. |
+| [CLAUDE.md](./CLAUDE.md)                             | Agent-facing working notes and cross-cutting invariants.                                      |
 
 ## Build and run
 
@@ -31,15 +32,17 @@ git submodule update --init --recursive
 
 All common tasks run through the top-level `Makefile`:
 
-| Target         | What it does                                                        |
-| -------------- | ------------------------------------------------------------------- |
-| `make help`    | List targets (default).                                             |
-| `make build`   | `cargo build --release --locked`.                                   |
-| `make test`    | `cargo test --locked` (unit + integration).                         |
-| `make bench`   | `cargo bench --no-run --locked` (compile-check the criterion suite).|
-| `make lint`    | `cargo fmt --check` + `cargo clippy -- -D warnings`.                |
-| `make podman`  | Build the distroless container image via rootless podman; override with `CONTAINER=docker`. Tagged with the LDNOOBW SHA. |
-| `make run`     | Run locally with a dev-only `BWS_API_KEYS`.                         |
+| Target               | What it does                                                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `make help`          | List targets (default).                                                                                                 |
+| `make build`         | `cargo build --release --locked`.                                                                                       |
+| `make test`          | `cargo test --locked` (unit + integration).                                                                             |
+| `make bench`         | `cargo bench --no-run --locked` (compile-check the criterion suite).                                                    |
+| `make lint`          | `cargo fmt --check` + `cargo clippy -- -D warnings`.                                                                    |
+| `make podman`        | Build the distroless container image via rootless podman; override with `CONTAINER=docker`. Tagged with the LDNOOBW SHA. |
+| `make run`           | Run locally with a dev-only `BWS_API_KEYS`.                                                                             |
+| `make install-tools` | Install pinned dev tools (`oha` for load tests).                                                                        |
+| `make release-check` | Pre-tag gate: `lint` + `test` + `bench` + `podman`. See [RELEASE.md](./RELEASE.md) for the rest of the release flow.    |
 
 ## Configuration
 
