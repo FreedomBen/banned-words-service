@@ -16,6 +16,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::require_bearer;
 use crate::error::ApiError;
+use crate::limits::gate as inflight_gate;
 use crate::state::AppState;
 
 pub mod check;
@@ -29,14 +30,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let list_version_value =
         HeaderValue::from_str(state.list_version).expect("LIST_VERSION is ASCII hex");
 
-    // Layers apply inside-out. Request flow on /v1/* is therefore:
+    // Layers apply inside-out. Request flow on /v1/check is therefore:
     //   X-List-Version (response-only, outermost)
-    //   → auth (fast 401 before body parse)
+    //   → auth (fast 401 before body parse, before the gate)
     //   → remap_413 (rewrites tower-http's default 413 body)
     //   → RequestBodyLimitLayer (64 KiB raw-body cap)
+    //   → inflight_gate (/v1/check only; excludes /v1/languages)
     //   → handler (post-normalization 192 KiB cap via NormalizeError::TooLarge)
+    //
+    // /v1/languages shares everything in the chain except the gate — DESIGN
+    // §Deployment scopes BWS_MAX_INFLIGHT to /v1/check only. The gate layer
+    // is applied to a router that only contains /v1/check, then /v1/languages
+    // is added afterwards so the layer doesn't reach it.
     let v1: Router<Arc<AppState>> = Router::new()
         .route("/v1/check", post(check::check))
+        .layer(from_fn_with_state(state.clone(), inflight_gate))
         .route("/v1/languages", get(languages::languages))
         .layer(RequestBodyLimitLayer::new(RAW_BODY_LIMIT_BYTES))
         .layer(from_fn(remap_413))

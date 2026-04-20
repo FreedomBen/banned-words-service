@@ -1,7 +1,7 @@
 //! Shared runtime state. An `Arc<AppState>` is threaded through axum's
 //! `State<S>` extractor and captured by the auth middleware closure.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 
 use crate::matcher::Engine;
@@ -17,6 +17,11 @@ pub struct AppState {
     /// Flipped to `true` in `main` before the listener binds. `/readyz`
     /// observes this with `Acquire` ordering.
     pub ready: AtomicBool,
-    /// Configured `BWS_MAX_INFLIGHT`; consumed by the M5 gate.
+    /// Configured `BWS_MAX_INFLIGHT`; ceiling consulted by the `limits::gate`
+    /// middleware mounted on `/v1/check`.
     pub max_inflight: usize,
+    /// Live count of requests currently executing the `/v1/check` handler.
+    /// `Arc<AtomicUsize>` so the gate and the M6 `bws_inflight` gauge share a
+    /// single cell without touching the whole `AppState`.
+    pub inflight: Arc<AtomicUsize>,
 }

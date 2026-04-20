@@ -3,7 +3,7 @@
 //! binding a real TCP listener.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -27,6 +27,7 @@ fn test_state() -> Arc<AppState> {
         list_version: LIST_VERSION,
         ready: AtomicBool::new(true),
         max_inflight: 1024,
+        inflight: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -44,6 +45,25 @@ fn multi_lang_state() -> Arc<AppState> {
         list_version: LIST_VERSION,
         ready: AtomicBool::new(true),
         max_inflight: 1024,
+        inflight: Arc::new(AtomicUsize::new(0)),
+    })
+}
+
+/// Pre-saturated fixture for the M5 503 `overloaded` test. `inflight` is
+/// already at `max_inflight`, so the very next `/v1/check` admission trips
+/// the gate without needing a second concurrent request in flight.
+fn saturated_state() -> Arc<AppState> {
+    let mut langs: HashMap<Lang, &[&str]> = HashMap::new();
+    langs.insert("en".into(), &["foo"][..]);
+    let engine = Arc::new(Engine::new(&langs));
+    let max = 4usize;
+    Arc::new(AppState {
+        engine,
+        api_keys: vec![TEST_KEY.as_bytes().to_vec()],
+        list_version: LIST_VERSION,
+        ready: AtomicBool::new(true),
+        max_inflight: max,
+        inflight: Arc::new(AtomicUsize::new(max)),
     })
 }
 
@@ -438,4 +458,117 @@ async fn unknown_fields_silently_accepted() {
     );
     let resp = send(req).await;
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// M5 — limits, backpressure, and remaining error-table rows
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn invalid_mode_is_422() {
+    let req = authed(
+        "POST",
+        "/v1/check",
+        Body::from(r#"{"text":"hi","mode":"loose"}"#),
+    );
+    let resp = send(req).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v = json_body(resp).await;
+    assert_eq!(v["error"], "invalid_mode");
+}
+
+#[tokio::test]
+async fn post_normalization_size_returns_413() {
+    // U+FDFA (ARABIC LIGATURE SALLALLAHOU...) NFKC-decomposes to 18 codepoints
+    // (~33 UTF-8 bytes). 10 000 copies: ~30 KiB raw (under the 64 KiB
+    // RequestBodyLimitLayer cap) but ~322 KiB normalized — over the 192 KiB
+    // MAX_NORMALIZED_BYTES. Exercises the post-normalization 413 rail that
+    // lives in routes::check, distinct from the raw-body 413 from M3.
+    let text: String = "\u{FDFA}".repeat(10_000);
+    let body = serde_json::to_vec(&serde_json::json!({ "text": text })).unwrap();
+    assert!(
+        body.len() < 64 * 1024,
+        "raw body must stay under the 64 KiB cap so only the post-norm rail fires"
+    );
+    let req = authed("POST", "/v1/check", Body::from(body));
+    let resp = send(req).await;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let v = json_body(resp).await;
+    assert_eq!(v["error"], "payload_too_large");
+}
+
+#[tokio::test]
+async fn overloaded_returns_503_with_x_list_version() {
+    let req = authed("POST", "/v1/check", Body::from(r#"{"text":"hi"}"#));
+    let resp = send_with(saturated_state(), req).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        resp.headers()
+            .get("x-list-version")
+            .expect("X-List-Version on 503 overloaded")
+            .to_str()
+            .unwrap(),
+        LIST_VERSION
+    );
+    let v = json_body(resp).await;
+    assert_eq!(v["error"], "overloaded");
+}
+
+#[tokio::test]
+async fn overloaded_does_not_gate_v1_languages() {
+    // DESIGN §Deployment scopes BWS_MAX_INFLIGHT to /v1/check; /v1/languages
+    // must succeed even when the counter is saturated.
+    let req = authed("GET", "/v1/languages", Body::empty());
+    let resp = send_with(saturated_state(), req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn overloaded_state_still_fast_paths_missing_auth() {
+    // Auth runs before the gate; an unauthenticated request to a saturated
+    // service still gets 401, not 503. Protects DESIGN's ordering invariant.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/check")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"text":"hi"}"#))
+        .unwrap();
+    let resp = send_with(saturated_state(), req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn inflight_counter_decrements_after_successful_request() {
+    // RAII guard in limits::gate must decrement the shared counter so a burst
+    // of sequential requests doesn't leak admissions and eventually self-DoS.
+    let state = test_state();
+    assert_eq!(state.inflight.load(Ordering::Relaxed), 0);
+    let req = authed("POST", "/v1/check", Body::from(r#"{"text":"hi"}"#));
+    let resp = send_with(state.clone(), req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.inflight.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn inflight_counter_decrements_after_rejected_request() {
+    // 422/400 paths still run inside the gate, so the guard's Drop must fire
+    // on error responses too.
+    let state = test_state();
+    assert_eq!(state.inflight.load(Ordering::Relaxed), 0);
+    let req = authed("POST", "/v1/check", Body::from(r#"{"text":""}"#));
+    let resp = send_with(state.clone(), req).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(state.inflight.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn overloaded_rejection_does_not_leak_counter() {
+    // Saturated gate: reject path does fetch_add then fetch_sub — the counter
+    // must land back on its pre-request value.
+    let state = saturated_state();
+    let start = state.inflight.load(Ordering::Relaxed);
+    let req = authed("POST", "/v1/check", Body::from(r#"{"text":"hi"}"#));
+    let resp = send_with(state.clone(), req).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(state.inflight.load(Ordering::Relaxed), start);
 }

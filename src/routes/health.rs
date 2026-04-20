@@ -44,7 +44,7 @@ mod tests {
     use crate::matcher::{Engine, Lang, LIST_VERSION};
     use http_body_util::BodyExt;
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn state_with_ready(ready: bool) -> Arc<AppState> {
         let mut langs: HashMap<Lang, &[&str]> = HashMap::new();
@@ -56,6 +56,7 @@ mod tests {
             list_version: LIST_VERSION,
             ready: AtomicBool::new(ready),
             max_inflight: 1024,
+            inflight: Arc::new(AtomicUsize::new(0)),
         })
     }
 

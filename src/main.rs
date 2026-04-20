@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use banned_words_service::build_router;
@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         list_version: LIST_VERSION,
         ready: AtomicBool::new(false),
         max_inflight: cfg.max_inflight,
+        inflight: Arc::new(AtomicUsize::new(0)),
     });
     state.ready.store(true, Ordering::Release);
 

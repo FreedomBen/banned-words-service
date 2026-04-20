@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod limits;
 pub mod matcher;
 pub mod model;
 pub mod routes;
