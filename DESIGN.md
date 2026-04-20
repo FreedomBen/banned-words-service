@@ -187,9 +187,19 @@ Callers often want to redact or highlight, not just know the boolean. Returning 
   - *(No `BWS_DEFAULT_MODE` — mode defaulting is per-language and defined in code, not config, so behavior is identical across deployments.)*
 - **List updates ship via redeploy.** No hot reload, ever — it keeps the hot path lock-free and makes the running version trivially auditable (image tag = list version).
 
+### Kubernetes deployment (DOKS)
+
+- **Target.** Digital Ocean Kubernetes Service (DOKS), deployed into an **existing** shared cluster. Cluster provisioning is out of scope; this assumes standard `kubectl` access and an in-cluster Prometheus stack that scrapes `/metrics`.
+- **Exposure: in-cluster only in v1.** A single `Service` of type `ClusterIP` fronts the pods on port 8080. **No Ingress, LoadBalancer, or NodePort** — the service is not reachable from outside the cluster, and the API key is defense-in-depth over that network boundary, not the sole perimeter. In-cluster consumers reach it at `banned-words-service.<namespace>.svc.cluster.local:8080`. Public exposure (behind a rate-limiting gateway / WAF) is a deliberate future step; see "Deferred to v2".
+- **Config delivery.** `BWS_API_KEYS` lives in a Kubernetes `Secret`; `BWS_LANGS`, `BWS_MAX_INFLIGHT`, and `BWS_LISTEN_ADDR` live in a `ConfigMap`. Both mount as env vars on the pod. Rotating keys is a `Secret` edit plus rolling restart — no hot reload, matching the "immutable at runtime" principle.
+- **Probes.** `livenessProbe` → `GET /healthz`; `readinessProbe` → `GET /readyz`. Both are unauthenticated per API §Authentication. The listener binds only after automatons finish loading, so in practice readiness flips to 200 as soon as the pod accepts TCP; the documented 503 window is effectively unobservable except by a sidecar that races startup.
+- **Pod security context.** Non-root UID, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, all capabilities dropped, `seccompProfile: RuntimeDefault`. The binary needs no writable paths (list is compiled in; logs go to stdout).
+- **Rollout.** Standard `RollingUpdate`. Pods are fungible and cold-start in milliseconds (automaton build ≪ image pull), so low `maxUnavailable` with small `maxSurge` is cheap. During a rolling deploy `X-List-Version` and the `bws_list_version_info` gauge briefly take two values across the fleet — expected, not cardinality growth.
+- **Scaling.** Horizontal via replicas; HPA on CPU plus `bws_inflight` (via the cluster's Prometheus custom-metrics adapter, assumed already installed). No VPA — memory footprint is flat and bounded by `BWS_MAX_INFLIGHT × ~256 KiB` worst case.
+
 ## Threat model and abuse posture
 
-The service authenticates every `/v1/*` request against the key set in `BWS_API_KEYS` (see "Authentication" under API). It does **not** perform per-caller rate limiting, quotas, or request signing beyond that — those belong in the gateway. It is expected to sit behind an authenticated gateway or inside a trusted internal network; the API key is a second line of defense, not the only one.
+The service authenticates every `/v1/*` request against the key set in `BWS_API_KEYS` (see "Authentication" under API). It does **not** perform per-caller rate limiting, quotas, or request signing beyond that — those belong in the gateway. It is expected to sit behind an authenticated gateway or inside a trusted internal network (in v1 this means in-cluster only on DOKS — `ClusterIP` Service, no Ingress; see Deployment §"Kubernetes deployment (DOKS)"); the API key is a second line of defense, not the only one.
 
 **In-process defenses:**
 
@@ -207,6 +217,7 @@ The in-process concurrency cap is a liveness safeguard, not a rate limit: it pre
 - **Per-tenant allowlist / denylist overrides.** The v1 request schema will silently accept (and ignore) an `overrides` field, so adding real semantics later is non-breaking.
 - **Leetspeak / homoglyph normalization.** Requires careful false-positive analysis before shipping.
 - **Multi-tenant rate limiting.** Likely belongs in the gateway, not this service — revisit if that assumption breaks.
+- **Public ingress.** v1 runs as a `ClusterIP` Service with no Ingress — in-cluster traffic only. Making the service externally reachable requires adding an Ingress or gateway with rate limiting and request-size policy in front; the API key alone is not a substitute (see Threat model).
 
 ## Milestones
 

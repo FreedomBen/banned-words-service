@@ -44,7 +44,12 @@ banned-words-service/
 ├── benches/                       # criterion benches
 └── deploy/
     ├── Dockerfile                 # cargo-chef + distroless
-    └── k8s/                       # manifests, probes, HPA
+    └── k8s/                       # DOKS manifests — ClusterIP only, no Ingress in v1
+        ├── deployment.yaml
+        ├── service.yaml           # type: ClusterIP, port 8080
+        ├── configmap.yaml         # BWS_LANGS, BWS_MAX_INFLIGHT, BWS_LISTEN_ADDR
+        ├── secret.example.yaml    # BWS_API_KEYS template; real Secret managed out-of-repo
+        └── hpa.yaml               # CPU + bws_inflight (custom-metrics adapter stubbed)
 ```
 
 ## Milestone 1 — Scaffold and build-time codegen
@@ -156,7 +161,14 @@ banned-words-service/
 
 1. Dockerfile: cargo-chef recipe → builder → `gcr.io/distroless/cc-debian12:nonroot` (or static) final stage. Non-root UID, read-only root FS.
 2. Image labels: `org.opencontainers.image.revision`, `list_version` (the LDNOOBW SHA).
-3. k8s manifests under `deploy/k8s/`: Deployment, Service, HPA (CPU + `bws_inflight` via custom metric adapter — stubbed), liveness → `/healthz`, readiness → `/readyz`.
+3. k8s manifests under `deploy/k8s/`, targeting DOKS (existing cluster; cluster provisioning out of scope). Per DESIGN §"Kubernetes deployment (DOKS)":
+   - `Deployment` with non-root UID, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, all capabilities dropped, `seccompProfile: RuntimeDefault`. Standard `RollingUpdate` strategy.
+   - `Service` of type **`ClusterIP`** on port 8080. **No Ingress, no LoadBalancer, no NodePort** — v1 is in-cluster only; consumers reach the service at `banned-words-service.<namespace>.svc.cluster.local:8080`.
+   - `Secret` holding `BWS_API_KEYS` (template only — real Secret managed out-of-repo); `ConfigMap` holding `BWS_LANGS`, `BWS_MAX_INFLIGHT`, `BWS_LISTEN_ADDR`; both mounted as env vars.
+   - `livenessProbe` → `GET /healthz`; `readinessProbe` → `GET /readyz`. Neither authenticated (per DESIGN §Authentication).
+   - `HPA` on CPU + `bws_inflight` via custom-metrics adapter — stubbed; concrete adapter wiring is the operator's responsibility (DOKS does not preinstall one).
+   - Namespace not hardcoded in manifests; operator selects via `-n` / kustomize overlay.
+   - Resource requests/limits left as placeholders until M8 load-test data is in; memory ceiling is `BWS_MAX_INFLIGHT × ~256 KiB` per DESIGN §Deployment.
 4. `README` snippet: env-var table mirrored from DESIGN (single source of truth kept in DESIGN; README links there).
 5. Root `Makefile` (default `PREFIX=/usr/local` per global convention) with targets: `help` (default; lists the targets with one-line descriptions), `build` (`cargo build --release`), `test` (`cargo test`), `lint` (`cargo fmt --check && cargo clippy -- -D warnings`), `docker` (build the container image, tagged with the LDNOOBW SHA), and `run` (`cargo run` with a dev-only `BWS_API_KEYS`). M9's `make docker` exit criterion depends on this target existing.
 
