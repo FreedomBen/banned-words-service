@@ -88,17 +88,17 @@ banned-words-service/
 1. `config.rs`:
    - `BWS_LISTEN_ADDR`: HTTP listen address. Defaults to `0.0.0.0:8080` when unset — matches DESIGN §Deployment, and keeps `cargo run` and local Docker usage working with only `BWS_API_KEYS` set.
    - `BWS_API_KEYS`: **required**. Parse per DESIGN §Deployment — split on `,`, trim surrounding ASCII whitespace from each entry, reject empty entries, deduplicate, reject any entry that itself contains `,`; warn (do not reject) on entries shorter than 32 bytes. Unset / empty / zero-keys after parsing is a fatal startup error with a clear message.
-   - `BWS_LANGS`: optional runtime allowlist (unknown-code handling lands in M4).
+   - `BWS_LANGS`: optional runtime allowlist. Parse per DESIGN §Deployment — split on `,`, trim surrounding ASCII whitespace, ASCII-lowercase, reject empty entries, deduplicate. Defaults to every compiled language. Unknown-code rejection lands in M4; parsing rules apply from M3.
    - `BWS_MAX_INFLIGHT`: default `1024`.
    Config unit tests cover each `BWS_API_KEYS` rule independently: whitespace trim, empty-entry rejection, dedup, comma-in-key rejection, short-key warning emission, zero-keys fatal.
 2. `auth.rs`: extract `Authorization: Bearer <k>`, compare each candidate via `subtle::ConstantTimeEq`, **always iterating the full set**. Log `key_id = hex(sha256(key))[..8]` on success; log only `reason` on failure.
 3. `error.rs`: single `ApiError` enum → `IntoResponse` producing `{error, message}` with the right status. `X-List-Version` attachment is **not** done here — it lives in a response-layer middleware scoped to the `/v1` sub-router (see item 7), so `/healthz`, `/readyz`, `/metrics` do not carry the header while every `/v1/*` response (success, 4xx including fast-pathed 401, and 5xx) does.
 4. `matcher::DEFAULT_MODE: phf::Map<&str, Mode>` — space-delimited langs → `Strict`, CJK (`ja`, `zh`, `ko`) → `Substring`. Full table lands here (pulled forward from M4) even though only `en` is actively loaded in M3, so `routes/languages.rs` can serve its canonical shape from day one. M4 then adds languages to the automaton map without churning the `/v1/languages` response contract.
-5. `routes/check.rs`: deserialize `CheckRequest`, validate, call `Engine::scan`, serialize `CheckResponse`. `mode_used` populated for every requested language.
-6. `routes/languages.rs`: response from the compiled table in alphabetical order by ISO code, shape `[{code, default_mode}, ...]`, restricted to languages currently in the automaton map. `default_mode` is sourced from `matcher::DEFAULT_MODE`.
+5. `routes/check.rs`: deserialize `CheckRequest`; validate, ASCII-lowercasing each `langs` entry before membership check so `"EN"` and `"en"` are equivalent (DESIGN §"POST /v1/check"); call `Engine::scan`; serialize `CheckResponse`. `mode_used` populated for every requested language.
+6. `routes/languages.rs`: response from the compiled table in alphabetical order by ISO code, shape `{"languages": [{code, default_mode}, ...]}` (DESIGN §"Other endpoints"), restricted to languages currently in the automaton map. `default_mode` is sourced from `matcher::DEFAULT_MODE`.
 7. `routes/health.rs`: `/healthz` always returns 200. `/readyz` returns 200 with `{ "ready": true, "list_version": "<SHA>", "languages": N }` once all automatons are built, else 503 with `{ "ready": false }`. The listener binds only *after* the engine is ready, so the 503 state is essentially unobservable in practice — still implemented for correctness and for operators inspecting a sidecar that races startup.
-8. Middleware stack, ordered outermost → innermost (first to see the request first): request-id → `tracing` span → RED metrics layer (M6) → `X-List-Version` injector (scoped to the `/v1` router) → auth (fast 401 before body work) → raw body-size limit (64 KiB, `tower_http::limit::RequestBodyLimitLayer`) → in-flight gate (M5; `/v1/check` only) → handler. This ordering realises the DESIGN invariants that 401 runs before body parse and before the gate, and that fast-pathed 401s still carry `X-List-Version` and still increment the RED series.
-9. Integration tests via `axum::Router::oneshot` for: auth missing/invalid/valid, body too large, malformed JSON, empty `text`, empty `langs`, unknown language, happy path.
+8. Middleware stack, ordered outermost → innermost (first to see the request first): request-id → `tracing` span → RED metrics layer (M6; applied globally so `/v1/*`, `/healthz`, `/readyz`, and `/metrics` all register in the RED series). Routing then splits: `/healthz`, `/readyz`, and `/metrics` pass directly into their handlers with no auth, no `X-List-Version`, and no body cap. Every `/v1/*` request additionally traverses `X-List-Version` injector → auth (fast 401 before body work) → raw body-size limit (64 KiB, `tower_http::limit::RequestBodyLimitLayer`; its default plain 413 body is remapped by a companion response layer to the `{error: "payload_too_large", message}` shape so every `/v1/*` 4xx matches DESIGN §API error table) → in-flight gate (M5; `/v1/check` only) → handler. M3 lands this stack minus the RED layer (M6) and the in-flight gate (M5). This ordering realises the DESIGN invariants that 401 runs before body parse and before the gate, that fast-pathed 401s still carry `X-List-Version` and still increment the RED series, and that `/healthz`/`/readyz`/`/metrics` remain unauthenticated per DESIGN §Authentication.
+9. Integration tests via `axum::Router::oneshot` (exercise auth on both `/v1/check` and `/v1/languages` since both share the `/v1/*` auth layer per DESIGN §Authentication): auth missing/invalid/valid, body too large, malformed JSON, missing `text` field (→400 `bad_request`), empty `text` (→422 `empty_text`), whitespace-only `text` accepted (DESIGN §"text — string, required"), empty `langs` (→422 `empty_langs`), unknown language (→422 `unknown_language`), case-folded `langs` entries (`"EN"` ≡ `"en"`), `/v1/languages` response-shape contract, happy path.
 
 **Exit criteria.** `curl -H "Authorization: Bearer $K" -d '{"text":"..."}' :8080/v1/check` returns the documented shape.
 
@@ -110,7 +110,7 @@ banned-words-service/
 2. `langs` defaulting: when omitted, scan every loaded language in alphabetical order.
 3. `mode` defaulting: per-language lookup via `matcher::DEFAULT_MODE`, echoed in `mode_used`. Explicit caller mode wins, including `strict` on CJK (no clamping).
 4. `BWS_LANGS` runtime allowlist: fatal startup error on unknown codes, with a helpful message listing compiled codes.
-5. Tests: mixed-language request, default vs explicit mode parity, CJK-strict honored, `BWS_LANGS` trimming and dedup.
+5. Tests: mixed-language request, default vs explicit mode parity, CJK-strict honored, `BWS_LANGS` trimming, ASCII-lowercasing, and dedup.
 
 **Exit criteria.** A single request across `en,ja,zh` returns a well-formed `mode_used` map and correctly-ordered matches.
 
@@ -122,7 +122,7 @@ banned-words-service/
 2. 413 at both raw-body (64 KiB, via `tower_http::limit::RequestBodyLimitLayer`) and post-normalization (192 KiB, inside the handler before scan).
 3. 503 `overloaded` returns immediately when the gate is full.
 4. Unknown-fields pass-through confirmed by test (including the reserved `overrides` key).
-5. Error-table test: one test per row of the DESIGN §API error table.
+5. Error-table test: one test per row of the DESIGN §API error table. The `500 internal` row is covered by a unit test on `ApiError::Internal.into_response()` asserting status, `{error: "internal", message}` body shape, and no leaked diagnostic detail — end-to-end triggering isn't worth a test-only code path.
 
 **Exit criteria.** All documented 4xx/5xx paths have a test; `X-List-Version` present on every `/v1/*` response including errors.
 
