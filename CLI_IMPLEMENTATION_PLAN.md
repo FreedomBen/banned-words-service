@@ -68,7 +68,7 @@ path, no second way for the two binaries to disagree.
   entry point; `Cargo.toml` grows a `[[bin]] name = "vv"` stanza and a
   single new dep (`clap` with `derive`); `cargo build --release --bin vv`
   produces a runnable binary that prints `--help` and exits.
-- [ ] **CM2 — `check` subcommand (local matcher).** End-to-end matching
+- [x] **CM2 — `check` subcommand (local matcher).** End-to-end matching
   with flag-driven text input; JSON output on stdout; exit code reflects
   whether any matches were found.
 - [ ] **CM3 — `languages` subcommand and `version` subcommand.** Read-only
