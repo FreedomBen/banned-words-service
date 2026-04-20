@@ -50,6 +50,7 @@ Both **strict** (whole-word) and **substring** matching are first-class in v1. C
 - **`mode: "strict"`.** A term matches only when both edges fall on a Unicode word boundary per UAX #29. Mitigates the common **Scunthorpe problem** (banned term appearing as a substring of a safe word) for space-delimited languages. Known residual cases not handled in v1: punctuation- or hyphen-joined obfuscations (e.g., `s-h-i-t`), zero-width-joiner insertions, and leetspeak substitutions. See "Deferred to v2".
 - **`mode: "substring"`.** Any Aho-Corasick hit counts. Appropriate for CJK (UAX #29 word boundaries are unreliable there) and for callers who explicitly want aggressive matching.
 - **Per-language default** (applied when `mode` is omitted): `strict` for space-delimited languages (en, es, fr, de, pt, it, nl, ru, …); `substring` for CJK (ja, zh, ko). The mode chosen per language is echoed back in `mode_used` so callers can audit.
+- **Explicit caller mode wins.** If a caller explicitly sends `mode: "strict"` with a CJK language, the service honors it without rejection or silent clamping — UAX #29 boundaries under-match in practice on CJK, but the caller's intent is preserved and `mode_used` reflects `"strict"`. The echo-back in `mode_used` is the audit trail; we do not second-guess an explicit choice.
 - **Span semantics.** Match `start`/`end` are byte offsets into the caller's **original** request text, suitable for direct slicing (`text[start:end]`) for redaction or highlighting. The normalizer maintains an offset map alongside the normalized buffer in a single pass, and matches are translated back before serialization. Cost: one extra `Vec<u32>` allocation per request, dwarfed by JSON parsing.
 - **Mapping across NFKC expansions.** When one source codepoint expands to multiple normalized codepoints (ligatures like `ﬁ` → `fi`, compatibility forms, fullwidth letters), a match covering any portion of the expanded output maps back to the **entire source codepoint's byte range**. For matches spanning multiple source codepoints, widening applies independently at each edge: the reported span is `[start-byte of the first source codepoint any part of whose expansion is touched, end-byte of the last such source codepoint]`. This is intentionally conservative: it guarantees `text[start:end]` always contains the offending content in full, at the cost of occasionally widening the reported span beyond the minimum. Spans are always on UTF-8 codepoint boundaries in the original text.
 
@@ -67,7 +68,9 @@ Authorization: Bearer <api-key>
 
 Keys are compared in constant time against the set configured via `BWS_API_KEYS` (see Deployment). Missing or unrecognized keys return **401 `unauthorized`** before any body parse or matching work — unauthenticated traffic pays ~zero CPU. `/healthz`, `/readyz`, and `/metrics` are deliberately **not** auth-gated so Kubernetes probes and Prometheus scrapers work without key provisioning; those endpoints should be reachable only from the cluster/pod network.
 
-Request logs record only `key_id` — the first 8 hex characters of the key's SHA-256 — never the key itself. This is enough to correlate traffic to a specific caller and to track rotation without leaking secrets into log aggregation.
+Request logs record only `key_id` — the first 8 hex characters of the key's SHA-256 — never the key itself. This is enough to correlate traffic to a specific caller and to track rotation without leaking secrets into log aggregation. On 401, logs record only the failure `reason` (`missing` or `invalid`) — never the attempted key nor any hash prefix derived from it, so the endpoint cannot be used as an oracle to probe the key space.
+
+`/v1/*` auth is uniform: `/v1/check` **and** `/v1/languages` both require a valid key. There is no metadata carve-out — the rule "every `/v1/*` request is authenticated" is easier to reason about and audit than any exemption would be.
 
 ### POST /v1/check
 
@@ -102,8 +105,8 @@ Success response (200):
 
 - Each match carries both `term` — the canonical dictionary entry from LDNOOBW, stable across requests and useful for grouping, metrics, and deduplication — and `matched_text`, the exact slice of the caller's **original** input (`text[start:end]`). The two differ after NFKC folding and case folding: e.g. a term listed as `idiot` may surface with `matched_text: "Ｉｄｉｏｔ"`. `term` is a `&'static str` from the compiled table (zero cost); `matched_text` is a short heap allocation per match and is bounded by the 256-match cap.
 - When `banned: false`, `matches` is `[]`. On any 200 response, `mode_used` is populated with an entry for every requested (or defaulted) language; error responses (4xx/5xx) use the `{error, message}` shape and do not carry `mode_used`.
-- Every `/v1/check` response — success or error — carries an `X-List-Version: <LDNOOBW commit SHA>` header. This lets each decision be audited against a specific list version without a round trip to `/readyz`, and survives proxies that rewrite bodies.
-- Matches are returned in leftmost-longest, non-overlapping order, capped at the **first 256 per request in that order**. If more were found, `truncated` is `true` and the caller knows the response is a prefix of the full match list. This bounds response size on pathological input.
+- Every `/v1/check` response — success, 4xx (including fast-pathed 401), and 5xx — carries an `X-List-Version: <LDNOOBW commit SHA>` header. This lets each decision be audited against a specific list version without a round trip to `/readyz`, and survives proxies that rewrite bodies. The header is static per process (constant from startup), so attaching it on the 401 fast path is free.
+- **Match ordering.** Within each language, matches are leftmost-longest and non-overlapping. Per-language groups are then concatenated in the order the caller supplied `langs` (or, when `langs` is omitted, the canonical loaded-languages order reported by `/v1/languages`). The final list is capped at the **first 256 in that order**; if more were found, `truncated` is `true` and the response is a strict prefix of the full list. This bounds response size on pathological input and keeps the truncation point deterministic under a fixed request.
 
 Error response (4xx):
 
@@ -120,6 +123,7 @@ Error response (4xx):
 | 422  | `unknown_language`  | A `langs` entry is not a loaded language code.               |
 | 422  | `empty_langs`       | `langs` is present but empty (`[]`).                         |
 | 500  | `internal`          | Unexpected server error. `message` is a short, fixed string; diagnostic detail goes to structured logs, never the response body. |
+| 503  | `overloaded`        | In-flight request count is at `BWS_MAX_INFLIGHT`. Backpressure signal; retry with jitter. |
 
 ### Other endpoints
 
@@ -166,6 +170,7 @@ Callers often want to redact or highlight, not just know the boolean. Returning 
   - `BWS_LISTEN_ADDR` — HTTP listen address (e.g. `0.0.0.0:8080`).
   - `BWS_API_KEYS` — **required**, comma-separated list of accepted API keys (e.g. `k_prod_ab12…,k_prod_cd34…`). If unset or empty, the service **refuses to start** with a clear error — there is no open/anonymous mode. Keys should be ≥32 bytes of cryptographically random data; the service warns (does not reject) on shorter keys so legacy tokens can be rotated in gracefully. Rotation: redeploy with the union of old + new keys, wait for callers to cut over, then redeploy with only the new set — no hot reload.
   - `BWS_LANGS` — optional comma-separated runtime allowlist (e.g. `en,es,fr`). Defaults to every language compiled into the binary. Useful for slimming a single fat image down to a specific deployment's needs without rebuilding. A code not compiled into the binary is a **fatal startup error** (`unknown language in BWS_LANGS: xx; compiled: ...`); silent drops would mask deploy-config typos and let a pod come up serving fewer languages than the operator intended.
+  - `BWS_MAX_INFLIGHT` — optional cap on concurrent in-flight `/v1/check` requests. Default `1024`. When at capacity, new requests are rejected with **503 `overloaded`** before body parse, bounding worst-case in-flight memory to roughly `BWS_MAX_INFLIGHT × (64 KiB body + offset map)`. This is a liveness safeguard, not a rate limit; callers should retry with jitter. Excluded from the cap: `/healthz`, `/readyz`, `/metrics`, and 401-fast-path rejections (all of which do no bounded-size work).
   - *(No `BWS_DEFAULT_MODE` — mode defaulting is per-language and defined in code, not config, so behavior is identical across deployments.)*
 - **List updates ship via redeploy.** No hot reload, ever — it keeps the hot path lock-free and makes the running version trivially auditable (image tag = list version).
 
@@ -175,13 +180,14 @@ The service authenticates every `/v1/*` request against the key set in `BWS_API_
 
 **In-process defenses:**
 
-- **401 fast path.** Missing or invalid keys are rejected before body parse, so unauthenticated traffic cannot force the service to allocate a parser or run a scan.
+- **401 fast path.** Missing or invalid keys are rejected before body parse and before the concurrency-cap gate, so unauthenticated traffic cannot force the service to allocate a parser, run a scan, or consume an in-flight slot.
 - **64 KiB request body cap** — 413 above that.
 - **256-match response cap** — `truncated: true` above that.
+- **Concurrency cap** (`BWS_MAX_INFLIGHT`, default 1024) — 503 `overloaded` above that. Bounds worst-case in-flight memory independent of gateway behavior.
 - **Bounded per-request work.** The Aho-Corasick scan is O(n) in input length with a constant factor independent of list size; no input can force superlinear CPU or memory. The 256-match cap bounds response size and per-match allocations, not scan cost — the scan always traverses the full input regardless of how many hits it produces.
-- **Constant-time key comparison** and **hash-prefix-only logging** prevent key-material leaks via timing or log exfiltration.
+- **Constant-time key comparison** and **hash-prefix-only logging of authenticated requests** (no key-derived data on auth failure) prevent key-material leaks via timing or log exfiltration.
 
-If the service is ever exposed directly to the public internet, a gateway-level rate limit and request-size policy must still be added — the API key alone does not defend against a credentialed abuser. Multi-tenant rate limiting is deferred to v2 and is expected to live in the gateway regardless (see below).
+The in-process concurrency cap is a liveness safeguard, not a rate limit: it prevents memory blow-up under load spikes but does not distinguish a credentialed abuser from legitimate traffic. If the service is ever exposed directly to the public internet, a gateway-level rate limit and request-size policy must still be added — the API key alone does not defend against a credentialed abuser. Multi-tenant rate limiting is deferred to v2 and is expected to live in the gateway regardless (see below).
 
 ## Deferred to v2
 
