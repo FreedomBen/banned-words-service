@@ -71,7 +71,7 @@ path, no second way for the two binaries to disagree.
 - [x] **CM2 — `check` subcommand (local matcher).** End-to-end matching
   with flag-driven text input; JSON output on stdout; exit code reflects
   whether any matches were found.
-- [ ] **CM3 — `languages` subcommand and `version` subcommand.** Read-only
+- [x] **CM3 — `languages` subcommand and `version` subcommand.** Read-only
   introspection endpoints the server exposes, reproduced as subcommands.
 - [ ] **CM4 — Input variants, output formats, error rails.** stdin and
   file input for `check`; `--output plain` and `--output json`; one exit

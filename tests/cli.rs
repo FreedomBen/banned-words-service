@@ -182,6 +182,41 @@ fn json_input_malformed_exits_two_as_invalid_json() {
 }
 
 #[test]
+fn vv_languages_emits_alphabetical_entries_with_known_modes() {
+    let out = vv().arg("languages").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let body = stdout_json(&out);
+    let langs = body["languages"].as_array().unwrap();
+    assert_eq!(langs.len(), 27);
+    let codes: Vec<&str> = langs.iter().map(|e| e["code"].as_str().unwrap()).collect();
+    let mut sorted = codes.clone();
+    sorted.sort();
+    assert_eq!(codes, sorted, "languages must be alphabetical");
+    for entry in langs {
+        let m = entry["default_mode"].as_str().unwrap();
+        assert!(
+            m == "strict" || m == "substring",
+            "unknown default_mode: {m}",
+        );
+    }
+}
+
+#[test]
+fn vv_version_emits_crate_list_and_language_count() {
+    let out = vv().arg("version").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let body = stdout_json(&out);
+    assert_eq!(
+        body["crate_version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+    );
+    let list_version = body["list_version"].as_str().unwrap();
+    assert_eq!(list_version.len(), 40, "list_version is a 40-char git SHA");
+    assert!(list_version.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(body["languages"].as_u64(), Some(27));
+}
+
+#[test]
 fn payload_too_large_exits_three() {
     // One byte past the normalize cap; ASCII 'a' is byte-identical after
     // NFKC so the raw length equals the normalized length.

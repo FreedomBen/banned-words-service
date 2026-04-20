@@ -9,8 +9,10 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::matcher::{compiled_langs, Engine, Lang, Mode, NormalizeError, LIST_VERSION, TERMS};
-use crate::model::{CheckRequest, CheckResponse, MatchDto};
+use crate::matcher::{
+    compiled_langs, Engine, Lang, Mode, NormalizeError, DEFAULT_MODE, LIST_VERSION, TERMS,
+};
+use crate::model::{CheckRequest, CheckResponse, LanguagesEntry, LanguagesResponse, MatchDto};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -122,9 +124,58 @@ pub fn run() -> ExitCode {
 
     match cli.command {
         Command::Check(args) => run_check(args),
-        Command::Languages(_) => ExitCode::SUCCESS,
-        Command::Version(_) => ExitCode::SUCCESS,
+        Command::Languages(args) => run_languages(args),
+        Command::Version(args) => run_version(args),
     }
+}
+
+fn run_languages(_args: LanguagesArgs) -> ExitCode {
+    // Mirrors routes/languages.rs: alphabetical code order, per-code
+    // default_mode from DEFAULT_MODE (Substring is the conservative
+    // fallback for any code without an explicit entry, matching the
+    // server's identical unwrap_or). Since the CLI has no runtime
+    // allowlist, the compiled set is the loaded set.
+    let entries: Vec<LanguagesEntry> = compiled_langs()
+        .into_iter()
+        .map(|code| {
+            let default_mode = DEFAULT_MODE
+                .get(code)
+                .copied()
+                .unwrap_or(Mode::Substring);
+            LanguagesEntry {
+                code: code.to_string(),
+                default_mode: default_mode.as_wire_str(),
+            }
+        })
+        .collect();
+
+    let resp = LanguagesResponse { languages: entries };
+    if let Err(e) = write_json(&resp) {
+        eprintln!("failed to write output: {e}");
+        return ExitCode::from(64);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_version(_args: VersionArgs) -> ExitCode {
+    // Shape: /readyz minus `ready` (always true for a local binary) plus
+    // `crate_version`. See CLI_IMPLEMENTATION_PLAN.md §CM3.
+    #[derive(serde::Serialize)]
+    struct VersionResponse {
+        crate_version: &'static str,
+        list_version: &'static str,
+        languages: usize,
+    }
+    let resp = VersionResponse {
+        crate_version: env!("CARGO_PKG_VERSION"),
+        list_version: LIST_VERSION,
+        languages: TERMS.len(),
+    };
+    if let Err(e) = write_json(&resp) {
+        eprintln!("failed to write output: {e}");
+        return ExitCode::from(64);
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_check(args: CheckArgs) -> ExitCode {
