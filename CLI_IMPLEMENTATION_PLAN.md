@@ -171,21 +171,32 @@ server runs and writes the same JSON body to stdout.
      `--json-input` counts as an input source for this check — it can
      stand alone without `--stdin`/`--text`/`--file`. Matches `jq`/`rg`.
    - `--lang <CODE>` (repeatable; also accepts comma-separated) — the
-     `langs` field on the request body. Parsing rules mirror the
-     server's `VV_LANGS` parse: trim surrounding ASCII whitespace,
-     ASCII-lowercase, reject empty entries (exit 2), deduplicate. An
-     unknown code exits 2 with a stderr message listing the compiled
-     codes (same phrasing as the server's `UnknownLangsError`).
-     **Ordering** is preserved: repeated flags appear in invocation
-     order, and within a single occurrence comma-separated entries
-     expand left-to-right. This is the order echoed into match
-     concatenation, matching the server's preservation of `langs[]`
-     order. Omitted ⇒ scan every compiled language alphabetically,
-     matching the server default. An empty list after parsing is
-     rejected with exit 2 (the CLI analog of the server's `422
-     empty_langs`); this state is only reachable via `--json-input`
-     carrying `{"langs": []}` — the argv path can't produce it because
-     an omitted `--lang` defaults to "scan every compiled language."
+     `langs` field on the request body. Parsing splits on `,` and
+     trims surrounding ASCII whitespace per entry (argv-only
+     plumbing — the server doesn't need either step because JSON
+     already pre-parses into an array of strings), then ASCII-
+     lowercases each entry and checks membership against loaded
+     codes. **No deduplication**: a repeated code scans the same
+     language twice, exactly mirroring what the server does when a
+     caller sends `{"langs":["en","en"]}` on the body path. (This
+     is a deliberate choice for parity with `--json-input`, which
+     passes `langs` through to the server's body-side handling
+     untouched; dedup would make argv and JSON paths diverge.) An
+     unknown code exits 2 with a stderr message listing the
+     compiled codes (same phrasing as the server's
+     `UnknownLangsError`). **Ordering** is preserved: repeated flags
+     appear in invocation order, and within a single occurrence
+     comma-separated entries expand left-to-right. This is the order
+     echoed into match concatenation, matching the server's
+     preservation of `langs[]` order. Omitted ⇒ scan every compiled
+     language alphabetically, matching the server default. An empty
+     list after parsing is rejected with exit 2 (the CLI analog of
+     the server's `422 empty_langs`); this state is only reachable
+     via `--json-input` carrying `{"langs": []}`. An empty argv
+     value like `--lang ""` is not the empty-list case — it produces
+     a one-entry list containing the empty string, which falls
+     through to the unknown-language rail with the empty string as
+     its (bogus) code.
    - `--mode <strict|substring>` — the `mode` field. Omitted ⇒
      per-language default from `DEFAULT_MODE`, same as the server.
    - `--json-input <PATH>` — alternative to the individual flags: parse
@@ -205,11 +216,13 @@ server runs and writes the same JSON body to stdout.
 2. Dispatch calls `Engine::scan(text, &scan_langs, mode)` directly.
    `Engine::scan` normalizes the raw text internally and returns
    `Result<ScanResult, NormalizeError>`, matching the pipeline
-   `routes/check.rs` drives on the server side. A
-   `NormalizeError::TooLarge` (post-normalization > 192 KiB) maps to
-   exit 3 with a short stderr message; other user-input failures
-   (empty text after the raw ≥1-byte check, unknown language,
-   invalid mode) map to exit 2 (see CM4 for the full table). On
+   `routes/check.rs` drives on the server side. The raw ≥1-byte
+   check runs uniformly on the text regardless of whether it arrived
+   via `--text` / `--file` / `--stdin` or the `text` field of
+   `--json-input`. A `NormalizeError::TooLarge` (post-normalization
+   > 192 KiB) maps to exit 3 with a short stderr message; other
+   user-input failures (empty text, unknown language, invalid mode)
+   map to exit 2 (see CM4 for the full table). On
    success, serialize a CLI-side wrapper DTO defined in `src/cli.rs`:
    ```rust
    #[derive(Serialize)]
@@ -242,7 +255,12 @@ server runs and writes the same JSON body to stdout.
    honored (exit code reflects hits), fullwidth evasion under
    substring CJK produces matches, `--json-input` with unknown fields
    including `overrides` succeeds, omitted `--lang` scans everything.
-   Reuse fixtures where possible from `tests/http.rs`.
+   Hardcoded input strings (Scunthorpe, fullwidth-evasion corpus, CJK
+   samples) may be copied from `tests/http.rs`; any actual helper
+   functions worth sharing lift into `tests/common/mod.rs`, which
+   both integration suites then `mod common;`-import (Rust's
+   integration-test files are separate compilation units, so this is
+   the only cross-test sharing mechanism).
 
 **Exit criteria.** `vv check --text "Scunthorpe" --lang en` exits `0`
 with an empty matches array; `vv check --text "badword" --lang en`
@@ -262,8 +280,11 @@ whitespace).
    `model::LanguagesResponse` directly. Exit 0.
 2. `vv version` emits a small JSON object: `{"crate_version": "<from
    CARGO_PKG_VERSION>", "list_version": "<LDNOOBW SHA>", "languages":
-   <N>}`. Shape matches `/readyz` minus the `ready` field (always true
-   for a local binary — if the binary ran, the engine built). Rationale:
+   <N>}`. Shape is `/readyz`'s body minus `ready` (always true for a
+   local binary — if the binary ran, the engine built) plus
+   `crate_version` — the one CLI-only addition, since the server
+   surfaces the build identity via the image tag and has no need to
+   echo it in a response. Rationale:
    the server surfaces `list_version` via `X-List-Version` and `/readyz`;
    the CLI has no HTTP response to hang it on, so it gets its own
    subcommand. Exit 0. A plain `vv --version` (clap's built-in) still
@@ -291,9 +312,10 @@ humans can read the output without `jq`.
    leftmost-longest non-overlapping, concatenated in the
    caller-supplied `--lang` order (alphabetical when `--lang` is
    omitted). When the response would have `truncated: true`, emit a
-   final `# truncated` sentinel line after the match rows — `#` is a
+   final `# truncated` sentinel line after exactly 256 match rows
+   (the server's hard cap per DESIGN §"Match ordering"); `#` is a
    comment prefix for awk/`cut` consumers, and consumers that don't
-   recognize it still get a row count that matches the cap exactly.
+   recognize it still see the row count equal the cap.
    `mode_used` is **not** emitted in plain output (JSON-only by
    design, per the mirror-table caveat); callers who need the per-lang
    mode echo should use `--output json`. Plain output for other
@@ -307,24 +329,31 @@ humans can read the output without `jq`.
    | `1`  | success, matches found or truncated | 200 OK, hits          |
    | `2`  | invalid usage / malformed JSON       | 400 `bad_request`, 422 `invalid_mode`, 422 `empty_text`, 422 `empty_langs`, 422 `unknown_language` — all collapsed to a single "user error" code on the CLI because argv is one rail, not several |
    | `3`  | input too large (post-normalization) | 413 `payload_too_large` via `NormalizeError::TooLarge` |
-   | `64` | I/O error — file unreadable, stdin closed early, or input bytes are not valid UTF-8 | no server equivalent — CLI-specific |
-   | `70` | internal error (should not happen)  | 500 `internal` |
-   | —    | unreachable in the CLI              | 503 `overloaded` — the CLI has no in-flight gate, so the condition cannot arise |
+   | `64` | I/O error — file unreadable, stdin closed early, or raw-text input bytes are not valid UTF-8 (invalid UTF-8 inside `--json-input` surfaces as "invalid JSON" and exits `2`) | no server equivalent — CLI-specific |
+   | `70` | internal error — a `std::panic::catch_unwind` wrapper at the top of `cli::run` caught a panic (should not happen) | 500 `internal` |
+   | —    | unreachable in the CLI              | 401 `unauthorized` — no auth layer in a local process; 503 `overloaded` — no in-flight gate, so the condition cannot arise |
 
    The collapse of 400/422 into a single `2` is deliberate: users
    interpret CLI exit codes coarsely, and stderr carries the specific
    message (`"unknown language: xx"`, etc.). Scripts that need the
    precise reason can parse stderr or use `--output json` with a server
    instead.
-3. `--verbose` / `-v` emits tracing-style single-line diagnostics on
-   stderr: input length, normalized length, mode resolution, per-lang
-   match counts. No `tracing_subscriber` dependency — this is direct
-   `eprintln!` with a consistent prefix. Metrics parity is not a goal.
+3. `--verbose` / `-v` is a flag on `check` only — `languages` and
+   `version` have no per-invocation computation worth narrating — and
+   emits tracing-style single-line diagnostics on stderr: input
+   length, normalized length, mode resolution, per-lang match counts.
+   No `tracing_subscriber` dependency — this is direct `eprintln!`
+   with a consistent prefix. Metrics parity is not a goal.
    Stream split is fixed: stdout carries only the normal output (JSON
    or plain per `--output`); `-v` lines always go to stderr regardless
    of `--output`, so `vv check | jq` is unaffected by verbosity.
 4. Integration tests cover every exit-code row with a triggering
    invocation, plus plain-output parity against hand-asserted bytes.
+   Exception: exit 70 is unit-tested against `cli::run_inner` (the
+   un-wrapped body that `cli::run` calls inside its
+   `catch_unwind`) with an injected panic — staging a deterministic
+   crash on the spawned binary would need a hidden test-only flag
+   that isn't worth the surface area.
 
 **Exit criteria.** `vv check --help` documents the exit-code table;
 every row is triggered by a test in `tests/cli.rs`.
@@ -364,13 +393,20 @@ runs, with no dynamic linkage.
    an explicit note that the CLI is feature-parity with `/v1/check` and
    `/v1/languages` except for auth, metrics, and the concurrency gate.
    The existing Makefile-targets table in the README gets the new rows.
-4. RELEASE.md is amended to mention that the `v1.0.0` tag now ships two
-   binaries: the server and `vv`. The reproducibility double-build and
-   list-version sanity check apply to both. A CI job triggered on
-   `v*` tag pushes builds the musl `vv` binary (via `make vv-static`)
-   and uploads it as a GitHub release asset alongside the server
-   container image digest; RELEASE.md codifies the manual verify step
-   (`./vv version` against the expected LDNOOBW SHA).
+4. New `.github/workflows/release.yml` — triggered on `v*` tag
+   pushes — handles both release artifacts in one place: builds and
+   pushes the server image to the registry at `:$TAG` and
+   `:$LIST_SHA`, builds the musl `vv` binary via `make vv-static`,
+   and uploads the binary as a GitHub release asset on the tag.
+   This automates the server IP M9 item 4 image-cut step, which is
+   currently described as a manual `podman push`; that milestone
+   warrants a one-line update to reference this workflow, landed in
+   the same commit as CM5. RELEASE.md is amended to document the
+   two-artifact story: reproducibility double-build and
+   list-version sanity check apply to both, the verify step is
+   `./vv version` against the expected LDNOOBW SHA, and the
+   human-owned procedure now ends at "push tag, watch workflow"
+   rather than a manual image push.
 
 **Exit criteria.** `ldd ./target/x86_64-unknown-linux-musl/release/vv`
 prints "not a dynamic executable"; `./vv check --text "..." --lang en`
