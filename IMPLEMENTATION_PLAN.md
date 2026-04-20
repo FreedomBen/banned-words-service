@@ -54,7 +54,7 @@ banned-words-service/
 2. Add submodule: `git submodule add https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words vendor/ldnoobw`; pin to a specific SHA and record it in `build.rs`.
 3. `build.rs`:
    - Walk `vendor/ldnoobw/`, pick up per-language files (`en`, `es`, …).
-   - Emit a generated `src/generated_terms.rs` containing:
+   - Emit the generated file to `$OUT_DIR/generated_terms.rs` (pulled in from `src/matcher/mod.rs` via `include!`). Never write into the source tree — that dirties the working copy, races cargo's rerun detection, and breaks the reproducible-build claim in M9. The file contains:
      - `pub const LIST_VERSION: &str = "<SHA>";`
      - `pub static TERMS: phf::Map<&'static str, &'static [&'static str]>` keyed by lowercase ISO code.
    - Emit `cargo:rerun-if-changed=vendor/ldnoobw` and on the submodule HEAD.
@@ -73,10 +73,11 @@ banned-words-service/
 2. `matcher::boundary`: `is_word_boundary(s: &str, byte_idx: usize) -> bool` per UAX #29, using `unicode-segmentation`.
 3. `matcher::scan`:
    - `Engine::new(langs: &HashMap<Lang, &[&str]>) -> Engine` builds one `AhoCorasick` per lang with `MatchKind::LeftmostLongest`, non-overlapping.
-   - `Engine::scan(text, langs, mode) -> ScanResult { mode_used, matches, truncated }`.
+   - `Engine::scan(text: &str, langs: &[Lang], mode: Option<Mode>) -> ScanResult { mode_used, matches, truncated }`. `mode = Some(m)` applies `m` uniformly to every scanned language (including CJK — no clamping) and echoes `m` in `mode_used` for each; `mode = None` looks each lang up in the `DEFAULT_MODE` table (populated in M4) and echoes the resolved value. `mode_used` always has one entry per scanned language.
+   - Both modes share the same per-language `AhoCorasick`; strict mode is a **post-match boundary filter** over the hits produced by the shared automaton, not a second automaton. Keeps hot-path memory flat regardless of which mode a request picks.
    - Span widening across NFKC expansions as specified in DESIGN §"Mapping across NFKC expansions".
    - 256-match cap applied *after* concatenation in caller-supplied `langs` order (alphabetical when omitted).
-4. Unit tests covering: ASCII strict vs substring, fullwidth evasion, ligature expansion (`ﬁ`), CJK substring, Scunthorpe case, truncation boundary at exactly 256 and 257 hits, empty-text rejection at boundary layer.
+4. Unit tests covering: ASCII strict vs substring, fullwidth evasion, ligature expansion (`ﬁ`), CJK substring, Scunthorpe case, truncation boundary at exactly 256 and 257 hits. Empty-text rejection lives at the handler (DESIGN §"text — string, required" — the ≥1-byte check runs on raw input before normalization) and is covered by the M3 integration tests, not here.
 
 **Exit criteria.** `cargo test --lib` green; criterion bench skeleton compiles.
 
@@ -84,14 +85,20 @@ banned-words-service/
 
 **Goal.** `/v1/check` end-to-end for a single language (`en`), `/v1/languages`, `/healthz`, `/readyz`.
 
-1. `config.rs`: `BWS_LISTEN_ADDR`, `BWS_API_KEYS` (required, parsed per DESIGN), `BWS_LANGS`, `BWS_MAX_INFLIGHT` (default 1024). Fail-closed on missing keys.
+1. `config.rs`:
+   - `BWS_LISTEN_ADDR`: HTTP listen address. Defaults to `0.0.0.0:8080` when unset — matches DESIGN §Deployment, and keeps `cargo run` and local Docker usage working with only `BWS_API_KEYS` set.
+   - `BWS_API_KEYS`: **required**. Parse per DESIGN §Deployment — split on `,`, trim surrounding ASCII whitespace from each entry, reject empty entries, deduplicate, reject any entry that itself contains `,`; warn (do not reject) on entries shorter than 32 bytes. Unset / empty / zero-keys after parsing is a fatal startup error with a clear message.
+   - `BWS_LANGS`: optional runtime allowlist (unknown-code handling lands in M4).
+   - `BWS_MAX_INFLIGHT`: default `1024`.
+   Config unit tests cover each `BWS_API_KEYS` rule independently: whitespace trim, empty-entry rejection, dedup, comma-in-key rejection, short-key warning emission, zero-keys fatal.
 2. `auth.rs`: extract `Authorization: Bearer <k>`, compare each candidate via `subtle::ConstantTimeEq`, **always iterating the full set**. Log `key_id = hex(sha256(key))[..8]` on success; log only `reason` on failure.
-3. `error.rs`: single `ApiError` enum → `IntoResponse` producing `{error, message}` with the right status. All variants attach `X-List-Version` header.
-4. `routes/check.rs`: deserialize `CheckRequest`, validate, call `Engine::scan`, serialize `CheckResponse`. `mode_used` populated for every requested language.
-5. `routes/languages.rs`: static response from compiled table, alphabetical order.
-6. `routes/health.rs`: `/healthz` always 200; `/readyz` reflects "engine built" flag. Listener binds *after* the engine is ready, so 503 is essentially unobservable in practice — still implemented for correctness.
-7. Middleware: body-size limit (64 KiB), `X-List-Version` injector, request-id, `tracing` span per request.
-8. Integration tests (hurl-style via `axum::Router::oneshot`) for: auth missing/invalid/valid, body too large, malformed JSON, empty `text`, empty `langs`, unknown language, happy path.
+3. `error.rs`: single `ApiError` enum → `IntoResponse` producing `{error, message}` with the right status. `X-List-Version` attachment is **not** done here — it lives in a response-layer middleware scoped to the `/v1` sub-router (see item 7), so `/healthz`, `/readyz`, `/metrics` do not carry the header while every `/v1/*` response (success, 4xx including fast-pathed 401, and 5xx) does.
+4. `matcher::DEFAULT_MODE: phf::Map<&str, Mode>` — space-delimited langs → `Strict`, CJK (`ja`, `zh`, `ko`) → `Substring`. Full table lands here (pulled forward from M4) even though only `en` is actively loaded in M3, so `routes/languages.rs` can serve its canonical shape from day one. M4 then adds languages to the automaton map without churning the `/v1/languages` response contract.
+5. `routes/check.rs`: deserialize `CheckRequest`, validate, call `Engine::scan`, serialize `CheckResponse`. `mode_used` populated for every requested language.
+6. `routes/languages.rs`: response from the compiled table in alphabetical order by ISO code, shape `[{code, default_mode}, ...]`, restricted to languages currently in the automaton map. `default_mode` is sourced from `matcher::DEFAULT_MODE`.
+7. `routes/health.rs`: `/healthz` always returns 200. `/readyz` returns 200 with `{ "ready": true, "list_version": "<SHA>", "languages": N }` once all automatons are built, else 503 with `{ "ready": false }`. The listener binds only *after* the engine is ready, so the 503 state is essentially unobservable in practice — still implemented for correctness and for operators inspecting a sidecar that races startup.
+8. Middleware stack, ordered outermost → innermost (first to see the request first): request-id → `tracing` span → RED metrics layer (M6) → `X-List-Version` injector (scoped to the `/v1` router) → auth (fast 401 before body work) → raw body-size limit (64 KiB, `tower_http::limit::RequestBodyLimitLayer`) → in-flight gate (M5; `/v1/check` only) → handler. This ordering realises the DESIGN invariants that 401 runs before body parse and before the gate, and that fast-pathed 401s still carry `X-List-Version` and still increment the RED series.
+9. Integration tests via `axum::Router::oneshot` for: auth missing/invalid/valid, body too large, malformed JSON, empty `text`, empty `langs`, unknown language, happy path.
 
 **Exit criteria.** `curl -H "Authorization: Bearer $K" -d '{"text":"..."}' :8080/v1/check` returns the documented shape.
 
@@ -99,9 +106,9 @@ banned-words-service/
 
 **Goal.** All LDNOOBW languages loaded; per-language mode default table wired up.
 
-1. `matcher::mod`: `DEFAULT_MODE: phf::Map<&str, Mode>` — space-delimited langs → `Strict`, CJK (`ja`, `zh`, `ko`) → `Substring`.
+1. Load all LDNOOBW languages (subject to `BWS_LANGS` in the next item) into the automaton map at startup; M3 ran with only `en`, and `DEFAULT_MODE` is already in place from M3.
 2. `langs` defaulting: when omitted, scan every loaded language in alphabetical order.
-3. `mode` defaulting: per-language lookup, echoed in `mode_used`. Explicit caller mode wins, including `strict` on CJK (no clamping).
+3. `mode` defaulting: per-language lookup via `matcher::DEFAULT_MODE`, echoed in `mode_used`. Explicit caller mode wins, including `strict` on CJK (no clamping).
 4. `BWS_LANGS` runtime allowlist: fatal startup error on unknown codes, with a helpful message listing compiled codes.
 5. Tests: mixed-language request, default vs explicit mode parity, CJK-strict honored, `BWS_LANGS` trimming and dedup.
 
@@ -123,9 +130,12 @@ banned-words-service/
 
 **Goal.** `/metrics` exposes the DESIGN §"Metrics contract" series with correct labels.
 
-1. `axum-prometheus` for RED metrics; override buckets via env.
+1. RED pair (via `axum-prometheus` or an equivalent tower layer), named per DESIGN §"Metrics contract":
+   - `bws_requests_total{status}` counter, with `status` bucketed as `2xx` / `4xx` / `5xx`.
+   - `bws_request_duration_seconds{status,endpoint}` histogram; `endpoint` ∈ {`/v1/check`, `/v1/languages`, `/healthz`, `/readyz`, `/metrics`}.
+   Override bucket boundaries via env. The RED layer must sit **outside** the auth layer (see M3 middleware order) so fast-pathed 401s flow through it — DESIGN explicitly requires them to increment both `bws_requests_total{status="4xx"}` and `bws_request_duration_seconds`, in addition to `bws_auth_failures_total`.
 2. Custom metrics registered in `observability.rs`:
-   - `bws_auth_failures_total{reason}`
+   - `bws_auth_failures_total{reason}`, `reason` ∈ {`missing`, `invalid`}.
    - `bws_match_duration_seconds{lang,mode}` — observed inside `scan` per lang.
    - `bws_matches_per_request`, `bws_truncated_total`, `bws_input_bytes`.
    - `bws_list_version_info{list_version}` set to 1 at startup.
@@ -156,7 +166,7 @@ banned-words-service/
    - 64 KiB input, English only.
    - Normalization-heavy input (fullwidth + NFKC expansions).
 2. CI job runs benches against main and PR, fails if p99 regresses > 10%. Use `critcmp` or a small harness.
-3. Load test script (`oha` or `vegeta`) committed under `bench/load/`; target p99 < 1 ms on the 1 KiB reference input, single core.
+3. Load test script (`oha` or `vegeta`) committed under `benches/load/` (same root as the criterion benches; cargo ignores non-`.rs` files there); target p99 < 1 ms on the 1 KiB reference input, single core.
 
 **Exit criteria.** A release-candidate tag produces a bench report checked into the PR description.
 
