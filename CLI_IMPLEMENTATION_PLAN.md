@@ -31,14 +31,15 @@ path, no second way for the two binaries to disagree.
 | LDNOOBW list                    | Compiled in via `build.rs`                     | Same compiled table                                     | `list_version` is the same SHA in both binaries. |
 | `DEFAULT_MODE` table            | 27 entries, strict vs substring per language    | Same table                                              | Per-language defaults identical. |
 | Explicit mode wins over default | Yes, no CJK clamping                           | Same                                                    | `strict` on `ja` is honored in both. |
-| `mode_used` echo in response    | Every scanned language                         | Same                                                    | Audit trail parity. |
+| `mode_used` echo in response    | Every scanned language                         | JSON output: same. Plain output: dropped.               | Audit trail parity holds for `--output json`; `--output plain` is match-row-only by design (see CM4). |
 | Alphabetical `langs` default    | Scan every loaded language alphabetically       | Same                                                    | Omitted `--lang` ⇒ all. |
 | 256-match cap + `truncated`     | Enforced in `Engine::scan`                      | Same code path                                          | Same cap, same wire field. |
 | Reserved `overrides` JSON key   | Silently accepted                              | Same, for `--json-input` mode                           | Schema forward-compatibility. |
-| `list_version` in output        | `X-List-Version` header + response body         | Response body only                                      | No HTTP ⇒ no header; JSON body carries it. |
+| `list_version` in output        | `X-List-Version` header; `/readyz` body (not in `/v1/check` body) | Flat in `vv check` body; also in `vv version` body      | The CLI has no HTTP header transport, so the audit value lives in the JSON body. CLI `check` body is a strict superset of the server's `/v1/check` body — same fields plus `list_version`. |
 | Bearer auth                     | Required on `/v1/*`                            | N/A                                                     | Local process; trust the invoker. |
-| `VV_API_KEYS` / `VV_MAX_INFLIGHT` / `VV_LISTEN_ADDR` / `VV_HISTOGRAM_BUCKETS` | Config-loaded | Ignored | No server, no gate, no metrics. |
-| `VV_LANGS` compile-time allowlist | Gates engine load at startup                 | Accepted as `--lang` flag on every invocation instead    | Flag-driven is the CLI idiom; env vars are not. |
+| `VV_API_KEYS` / `VV_MAX_INFLIGHT` / `VV_LISTEN_ADDR` / `VV_HISTOGRAM_BUCKETS` / `VV_CONFIG_FILE` / `/etc/vv/config.toml` | Config-loaded | Ignored — CLI reads no env vars and no TOML | No server, no gate, no metrics, and the CLI is deliberately flag-driven. |
+| `VV_LANGS` runtime allowlist    | Gates engine load at startup                   | Accepted as `--lang` flag on every invocation instead   | Flag-driven is the CLI idiom; env vars are not. |
+| Languages-endpoint scope        | `/v1/languages` reflects the `VV_LANGS`-filtered loaded set | `vv languages` always lists every compiled language | CLI has no runtime allowlist, so the compiled set is the loaded set. |
 | 64 KiB raw-body cap             | `RequestBodyLimitLayer`                         | No cap at input; 192 KiB post-normalization cap applies | CLI inputs are already process-bounded. |
 | 413 `payload_too_large`         | Error response                                  | Exit 3 with message on stderr                           | Same underlying `NormalizeError::TooLarge`. |
 | Observability (`tracing`, metrics) | JSON logs + Prometheus                       | `--verbose` stderr diagnostics only                     | No metrics, no persistent logs. |
@@ -88,7 +89,7 @@ banned-words-service/
 │   ├── bin/
 │   │   └── vv.rs                   # NEW — thin CLI entry, calls src/cli
 │   ├── cli.rs                       # NEW — arg parsing, I/O, formatting
-│   ├── lib.rs                       # EDIT — re-export matcher::{Engine, Mode, DEFAULT_MODE, NormalizeError}, model::*, LIST_VERSION
+│   ├── lib.rs                       # EDIT — `pub mod cli;` + re-export matcher::{Engine, Match, Mode, ScanResult, DEFAULT_MODE, NormalizeError, MAX_NORMALIZED_BYTES, LIST_VERSION} and model::*
 │   └── main.rs                      # unchanged — still the server binary
 ├── tests/
 │   └── cli.rs                       # NEW — integration tests invoking compiled `vv`
@@ -112,10 +113,14 @@ Notes on the split:
 **Goal.** `cargo build --release --bin vv` produces a binary that prints
 `--help` text covering the intended subcommand surface.
 
-1. Extend `src/lib.rs` re-exports so downstream binaries can consume the
-   matcher without `pub(crate)` gymnastics: `pub use matcher::{Engine,
-   Mode, DEFAULT_MODE, NormalizeError};` and `pub use model::*;` and
-   `pub use LIST_VERSION;`. Anything already re-exported for the
+1. Add `pub mod cli;` to `src/lib.rs` so the binary can dispatch into it
+   and the existing `cargo test --lib` job picks up CLI unit tests
+   (CM5 CI item 2 depends on this). Extend the re-exports the binary
+   needs: `pub use matcher::{Engine, Match, Mode, ScanResult,
+   DEFAULT_MODE, NormalizeError, MAX_NORMALIZED_BYTES, LIST_VERSION};`
+   (the `matcher` module is already `pub`, so these are shorthand for
+   callers, not a visibility widening) and `pub use model::*;` for the
+   request/response DTOs. Anything already re-exported for the
    integration tests stays as it is. No behavior change for `main.rs`.
 2. Add to `Cargo.toml`:
    ```toml
@@ -158,13 +163,19 @@ server runs and writes the same JSON body to stdout.
      `--stdin`.
    - `--file <PATH>` — read text from file. `-` is a synonym for stdin.
    - `--stdin` — read text from stdin. If none of `--text`/`--file`/
-     `--stdin` is given and stdin is not a TTY, default to stdin; if it
-     is a TTY, error (exit 2) with a usage hint. Matches the behavior
-     of `jq` and `rg`.
+     `--stdin`/`--json-input` is given and stdin is not a TTY, default
+     to `--stdin`; if it is a TTY, error (exit 2) with a usage hint.
+     `--json-input` counts as an input source for this check — it can
+     stand alone without `--stdin`/`--text`/`--file`. Matches `jq`/`rg`.
    - `--lang <CODE>` (repeatable; also accepts comma-separated) — the
-     `langs` field on the request body. Lowercase, dedup, same rules as
-     the server's `langs` field. Omitted ⇒ scan every compiled
-     language alphabetically, same as the server default.
+     `langs` field on the request body. Parsing rules mirror the
+     server's `VV_LANGS` parse: trim surrounding ASCII whitespace,
+     ASCII-lowercase, reject empty entries (exit 2), deduplicate. An
+     unknown code exits 2 with a stderr message listing the compiled
+     codes (same phrasing as the server's `UnknownLangsError`).
+     Omitted ⇒ scan every compiled language alphabetically, matching
+     the server default. An empty list after parsing is rejected with
+     exit 2 (the CLI analog of the server's `422 empty_langs`).
    - `--mode <strict|substring>` — the `mode` field. Omitted ⇒
      per-language default from `DEFAULT_MODE`, same as the server.
    - `--json-input <PATH>` — alternative to the individual flags: parse
@@ -174,10 +185,30 @@ server runs and writes the same JSON body to stdout.
      forward-compat stance. Mutually exclusive with `--text`/`--file`/
      `--stdin`/`--lang`/`--mode`.
 2. Dispatch calls `Engine::scan(text, &scan_langs, mode)` directly.
-   Errors map to exit codes and stderr messages (see CM4); on success,
-   serialize a `CheckResponse` via `serde_json::to_writer(stdout())` —
-   same struct the server emits, so the wire bytes are identical save
-   for whitespace.
+   `Engine::scan` normalizes the raw text internally and returns
+   `Result<ScanResult, NormalizeError>`, matching the pipeline
+   `routes/check.rs` drives on the server side. A
+   `NormalizeError::TooLarge` (post-normalization > 192 KiB) maps to
+   exit 3 with a short stderr message; other user-input failures
+   (empty text after the raw ≥1-byte check, unknown language,
+   invalid mode) map to exit 2 (see CM4 for the full table). On
+   success, serialize a CLI-side wrapper DTO defined in `src/cli.rs`:
+   ```rust
+   #[derive(Serialize)]
+   struct CliCheckResponse {
+       #[serde(flatten)] inner: CheckResponse,
+       list_version: &'static str,
+   }
+   ```
+   via `serde_json::to_writer(stdout())`. The `#[serde(flatten)]`
+   means the `banned`/`mode_used`/`matches`/`truncated` keys sit at
+   the top level byte-identical to the server's `/v1/check` body;
+   `list_version` is the only added key. Rationale: the server
+   surfaces `list_version` via the `X-List-Version` header, which the
+   CLI has no transport for — embedding it in the body is the CLI's
+   single-invocation audit-trail analog, so a caller that already has
+   `vv check` output never needs to also call `vv version` to know
+   which list SHA produced the decision.
 3. Exit-code policy for `check`:
    - `0` — no matches, `truncated: false`. Scriptable as "the text is
      clean."
@@ -197,8 +228,11 @@ server runs and writes the same JSON body to stdout.
 
 **Exit criteria.** `vv check --text "Scunthorpe" --lang en` exits `0`
 with an empty matches array; `vv check --text "badword" --lang en`
-exits `1` with a non-empty matches array; the JSON body byte-matches
-the server's `/v1/check` response shape for the same inputs.
+exits `1` with a non-empty matches array; the JSON body is the
+server's `CheckResponse` plus a `list_version` field — i.e.
+`jq 'del(.list_version)'` on the CLI output equals the server's
+`/v1/check` body for the same inputs byte-for-byte (modulo
+whitespace).
 
 ## Milestone CM3 — `languages` and `version` subcommands
 
@@ -232,9 +266,19 @@ humans can read the output without `jq`.
    ```
    <lang>\t<start>-<end>\t<term>\t<matched_text>
    ```
-   one TSV row per match, nothing when empty. Sensible for `awk`.
-   `plain` for `languages`: one `<code>\t<default_mode>` row per
-   language. `version`: plain prints `<crate_version>\t<list_version>`.
+   one TSV row per match, nothing when there are zero matches. Row
+   order follows DESIGN §"Match ordering": per-language
+   leftmost-longest non-overlapping, concatenated in the
+   caller-supplied `--lang` order (alphabetical when `--lang` is
+   omitted). When the response would have `truncated: true`, emit a
+   final `# truncated` sentinel line after the match rows — `#` is a
+   comment prefix for awk/`cut` consumers, and consumers that don't
+   recognize it still get a row count that matches the cap exactly.
+   `mode_used` is **not** emitted in plain output (JSON-only by
+   design, per the mirror-table caveat); callers who need the per-lang
+   mode echo should use `--output json`. Plain output for other
+   subcommands: `languages` emits one `<code>\t<default_mode>` row per
+   language; `version` emits `<crate_version>\t<list_version>`.
 2. Exit-code table, published in `vv check --help`:
 
    | Exit | Meaning                             | Corresponds to server |
@@ -243,7 +287,7 @@ humans can read the output without `jq`.
    | `1`  | success, matches found or truncated | 200 OK, hits          |
    | `2`  | invalid usage / malformed JSON       | 400 `bad_request`, 422 `invalid_mode`, 422 `empty_text`, 422 `empty_langs`, 422 `unknown_language` — all collapsed to a single "user error" code on the CLI because argv is one rail, not several |
    | `3`  | input too large (post-normalization) | 413 `payload_too_large` via `NormalizeError::TooLarge` |
-   | `64` | I/O error (file unreadable, stdin closed early) | no server equivalent — CLI-specific |
+   | `64` | I/O error — file unreadable, stdin closed early, or input bytes are not valid UTF-8 | no server equivalent — CLI-specific |
    | `70` | internal error (should not happen)  | 500 `internal` |
 
    The collapse of 400/422 into a single `2` is deliberate: users
@@ -274,8 +318,9 @@ runs, with no dynamic linkage.
      document it in `make help`.
    - `make install` — install both `banned-words-service` and `vv` to
      `$(PREFIX)/bin` (default `/usr/local/bin` per the global PREFIX
-     convention). An existing `install` target in the Makefile is
-     extended rather than replaced.
+     convention). No `install` target exists in the Makefile today
+     (M7 item 5 lists `help`, `build`, `test`, `bench`, `lint`,
+     `podman`, `run` only); this milestone adds it.
    - Update `make help` so the new targets appear in the same table
      format as the rest.
 2. CI (`.github/workflows/ci.yml`) gains a `cli` job:
