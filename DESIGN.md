@@ -12,6 +12,13 @@ Target: p99 latency < 1 ms for strings up to 1 KiB on a single core; tens of tho
 - Leetspeak / homoglyph normalization in v1 (tracked as future work).
 - Admin UI for editing the list (the list is baked in at build or startup).
 
+## Design principles
+
+1. **Fully stateless, zero external dependencies.** No database, no Redis, no disk reads on the hot path. The entire word list is compiled into the binary via `build.rs` and loaded into Aho-Corasick automatons at startup. Pods are fungible — kill one, start another, identical state in milliseconds. Horizontal scaling is `replicas: N`.
+2. **Immutable at runtime.** The word list only changes via redeploy. The image tag *is* the list version. This keeps the hot path lock-free and makes the running version trivially auditable.
+3. **Hot path is allocation-free.** One `Arc<AhoCorasick>` per language, shared across all request tasks. No per-request automaton construction, no per-request heap churn beyond the match buffer.
+4. **Sensible defaults, explicit overrides.** Callers can send just `{"text": "..."}` and get a correct answer. Power users can pin `langs` and `mode` per request.
+
 ## Tech stack
 
 | Layer        | Choice                                    | Why                                                           |
@@ -38,13 +45,14 @@ Memory footprint estimate: LDNOOBW is ~5k terms total across languages; the comb
 
 ## Matching semantics
 
-The **Scunthorpe problem** forces an explicit choice. v1 will use **whole-word matching** with Unicode word boundaries:
+Both **whole-word** and **substring** matching are first-class in v1. Callers pick per request via the `mode` field; there is no hidden default magic beyond a sensible fallback when `mode` is omitted.
 
-- Input is normalized (NFKC, lowercased via `caseless`).
-- A term matches only when surrounded by non-word characters (or string boundaries).
-- For CJK languages where whitespace tokenization is unreliable, fall back to substring match. This is flagged per-language in config.
+- Input is normalized (NFKC, lowercased via `caseless`) in both modes.
+- `mode: "strict"` — term must be bounded by non-word characters or string boundaries. Mitigates the **Scunthorpe problem** for space-delimited languages.
+- `mode: "substring"` — raw Aho-Corasick hit anywhere in the input. Appropriate for CJK and for callers who explicitly want aggressive matching.
+- When `mode` is omitted, the server picks per language: `strict` for space-delimited languages (en, es, fr, de, …), `substring` for CJK (ja, zh, …). The chosen mode is echoed back in the response so callers can audit.
 
-A `mode` query parameter (`strict` | `substring`) can override the default for callers who know what they want.
+Both modes share the same automaton; the difference is a post-match boundary check, so there is no meaningful perf gap between them.
 
 ## API
 
@@ -57,7 +65,7 @@ Content-Type: application/json
 {
   "text": "some user input",
   "langs": ["en", "es"],        // optional; defaults to all loaded languages
-  "mode": "strict"              // optional; "strict" | "substring"
+  "mode": "strict"              // optional; "strict" | "substring" — omit for per-language default
 }
 ```
 
@@ -66,8 +74,9 @@ Response:
 ```json
 {
   "banned": true,
+  "mode_used": { "en": "strict", "ja": "substring" },
   "matches": [
-    { "lang": "en", "term": "****", "start": 12, "end": 16 }
+    { "lang": "en", "term": "****", "start": 12, "end": 16, "mode": "strict" }
   ]
 }
 ```
@@ -95,14 +104,17 @@ Callers often want to redact or highlight, not just know the boolean. Returning 
 - Single stateless binary, horizontally scalable.
 - Container image built via `cargo chef` for fast layer caching.
 - Config via env vars: `BWS_LANGS`, `BWS_DEFAULT_MODE`, `BWS_LISTEN_ADDR`.
-- List updates = new image. No hot reload in v1 (keeps the hot path lock-free).
+- **List updates ship via redeploy.** No hot reload, ever — it keeps the hot path lock-free and makes the running version trivially auditable (image tag = list version).
+
+## Deferred to v2
+
+- **Per-tenant allowlist / denylist overrides.** The request schema will reserve an `overrides` field in v1 responses as `null` so adding it later is non-breaking.
+- **Leetspeak / homoglyph normalization.** Requires careful false-positive analysis before shipping.
+- **Multi-tenant rate limiting.** Likely belongs in the gateway, not this service — revisit if that assumption breaks.
 
 ## Open questions
 
-1. **Custom allowlist / denylist per tenant.** Out of scope for v1, but the API should leave room (`overrides` field) so we don't break clients later.
-2. **Multi-tenant rate limiting.** Probably belongs in the gateway, not this service.
-3. **Leetspeak normalization.** v2. Requires careful false-positive analysis.
-4. **Versioning of the word list.** Expose the LDNOOBW commit SHA in `/readyz` so callers can audit what they're hitting.
+1. **Versioning of the word list.** Expose the LDNOOBW commit SHA in `/readyz` so callers can audit exactly which list version they're hitting.
 
 ## Milestones
 
