@@ -7,6 +7,14 @@ description = "Vocab Veto — stateless multi-language banned-words HTTP service
 license = "MIT"
 publish = false
 
+[[bin]]
+name = "banned-words-service"
+path = "src/main.rs"
+
+[[bin]]
+name = "vv"
+path = "src/bin/vv.rs"
+
 [dependencies]
 aho-corasick = "1.1"
 caseless = "0.2"
@@ -28,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

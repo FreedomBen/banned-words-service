@@ -63,7 +63,7 @@ path, no second way for the two binaries to disagree.
 
 ## Progress
 
-- [ ] **CM1 — Library split and binary scaffold.** `src/lib.rs` re-exports
+- [x] **CM1 — Library split and binary scaffold.** `src/lib.rs` re-exports
   the matcher and model types the CLI needs; `src/bin/vv.rs` is a thin
   entry point; `Cargo.toml` grows a `[[bin]] name = "vv"` stanza and a
   single new dep (`clap` with `derive`); `cargo build --release --bin vv`
