@@ -15,7 +15,7 @@ Milestone-level status. Sub-items appear only where partial completion is worth 
 
 - [x] **M1 — Scaffold and build-time codegen.** `Cargo.toml`, `build.rs`, LDNOOBW submodule pinned, `$OUT_DIR/generated_terms.rs` emitted, hello-world `main.rs` prints `LIST_VERSION` and per-language term counts.
 - [x] **M2 — Matching core (library).** `matcher::{normalize, boundary, scan}` in place; unit tests under `cargo test --lib`; criterion bench skeleton at `benches/matcher.rs` compiles.
-- [ ] **M3 — HTTP surface (happy path).** `config.rs`, `auth.rs`, `error.rs`, `routes/`, `model.rs`, middleware stack, `DEFAULT_MODE` table, integration tests via `Router::oneshot`.
+- [x] **M3 — HTTP surface (happy path).** `config.rs`, `auth.rs`, `error.rs`, `routes/`, `model.rs`, `state.rs`; full middleware stack (X-List-Version response layer, body-size limit + 413 remap, bearer auth, `TraceLayer`); 27-entry `DEFAULT_MODE`; `Router::oneshot` integration tests cover every row called out in M3 item 9 plus a chunked-body 413 for defense-in-depth. M3 loads only `en` into the automaton map per the milestone contract; M4 expands it.
 - [ ] **M4 — Multi-language and mode defaults.** All LDNOOBW languages loaded; `BWS_LANGS` allowlist; per-language mode defaulting end-to-end.
 - [ ] **M5 — Limits, backpressure, and error surface.** In-flight gate on `/v1/check`; every documented 4xx/5xx row reachable by a test.
 - [ ] **M6 — Observability.** `/metrics` with the DESIGN §"Metrics contract" series; `BWS_HISTOGRAM_BUCKETS`; JSON `tracing-subscriber`.

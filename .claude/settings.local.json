@@ -14,7 +14,9 @@
       "Bash(cargo test *)",
       "Bash(cargo bench *)",
       "Bash(cargo clippy *)",
-      "Bash(cargo fmt *)"
+      "Bash(cargo fmt *)",
+      "Bash(cargo check *)",
+      "mcp__plugin_context-mode_context-mode__ctx_execute"
     ]
   }
 }
