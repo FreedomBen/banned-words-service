@@ -41,6 +41,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # GHCR requires lowercase repository names; github.repository preserves
+      # the owner's casing (e.g. FreedomBen/vocab-veto), so lowercase it here
+      # before building the tag refs.
+      - name: Lowercase repository name
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -51,8 +58,8 @@ jobs:
             LIST_VERSION=${{ steps.list.outputs.sha }}
             REVISION=${{ github.sha }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:${{ steps.list.outputs.sha }}
+            ghcr.io/${{ steps.repo.outputs.name }}:${{ github.ref_name }}
+            ghcr.io/${{ steps.repo.outputs.name }}:${{ steps.list.outputs.sha }}
 
   vv-static:
     name: Build static vv binary + attach to release
