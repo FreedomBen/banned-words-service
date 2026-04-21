@@ -2,8 +2,10 @@
 # The production deployment shape is deploy/k8s/; this file is for host-local
 # smoke tests and is not what the release pipeline consumes.
 #
-# VV_API_KEYS is required; set it in a sibling .env file or in the shell
-# environment. The service is fail-closed and will refuse to start without it.
+# VV_API_KEYS defaults to the same throwaway dev key that `make run` uses,
+# so `docker compose up --build` / `podman-compose up --build` works out of
+# the box. Set VV_API_KEYS in the environment or a sibling .env to override —
+# never rely on the default for anything reachable from a real network.
 #
 # Two modes:
 #   - Local build:   `docker compose up --build`   (or `podman-compose up --build`)
@@ -20,7 +22,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      VV_API_KEYS: ${VV_API_KEYS:?VV_API_KEYS must be set (comma-separated bearer keys, >=32 bytes each)}
+      VV_API_KEYS: ${VV_API_KEYS:-dev-key-do-not-use-in-production-0000000000000000}
       VV_LISTEN_ADDR: ${VV_LISTEN_ADDR:-0.0.0.0:8080}
       VV_MAX_INFLIGHT: ${VV_MAX_INFLIGHT:-1024}
       # VV_LANGS: "en,es,fr"        # optional runtime allowlist
