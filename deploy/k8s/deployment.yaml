@@ -45,7 +45,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: banned-words-service
-          image: banned-words-service:latest
+          image: vocab-veto:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

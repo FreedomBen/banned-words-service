@@ -15,7 +15,7 @@ make release-check               # fmt, clippy, tests, bench-compile, podman bui
 ```
 
 `make release-check` prints the image tag and revision it built on
-success. The image is `banned-words-service:<LIST_SHA>` plus `:latest`.
+success. The image is `vocab-veto:<LIST_SHA>` plus `:latest`.
 
 ## 2. Reproducibility verification (M9 item 1)
 
@@ -27,10 +27,10 @@ output.
 ### 2a. Server image
 
 ```bash
-make podman && podman image inspect banned-words-service:latest \
+make podman && podman image inspect vocab-veto:latest \
     --format '{{.Digest}} {{.Config.Labels.list_version}}'
-podman image rm banned-words-service:latest banned-words-service:"$(git -C vendor/ldnoobw rev-parse HEAD)"
-make podman && podman image inspect banned-words-service:latest \
+podman image rm vocab-veto:latest vocab-veto:"$(git -C vendor/ldnoobw rev-parse HEAD)"
+make podman && podman image inspect vocab-veto:latest \
     --format '{{.Digest}} {{.Config.Labels.list_version}}'
 ```
 
@@ -117,8 +117,8 @@ That is the entire operator step. `.github/workflows/release.yml`
 fires on the `v*` tag push and produces both release artifacts:
 
 - The server image is built and pushed to
-  `ghcr.io/<owner>/banned-words-service:v1.0.0` and
-  `ghcr.io/<owner>/banned-words-service:${LIST_SHA}` (the pair required
+  `ghcr.io/<owner>/vocab-veto:v1.0.0` and
+  `ghcr.io/<owner>/vocab-veto:${LIST_SHA}` (the pair required
   by §M9 item 4).
 - The static `vv` binary is built against
   `x86_64-unknown-linux-musl`, verified via `ldd` and a smoke check,

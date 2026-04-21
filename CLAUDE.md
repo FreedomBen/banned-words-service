@@ -18,7 +18,7 @@ No `Cargo.toml`, `Makefile`, `Containerfile`, or source tree exists yet. Build/t
 
 ## What this service is (big-picture)
 
-The project is named **Vocab Veto**. The repo directory and (eventual) crate name remain `banned-words-service` — the product/user-facing name is Vocab Veto. The env-var prefix is `VV_*` (renamed from the old `BWS_*` when the project was rebranded).
+The project is named **Vocab Veto**. The repo directory, crate name, and installed binary name remain `banned-words-service`; the **container image** is `vocab-veto` (matches the product name). The env-var prefix is `VV_*` (renamed from the old `BWS_*` when the project was rebranded). Kubernetes resource names and the in-cluster DNS (`banned-words-service.<namespace>.svc.cluster.local`) are also unchanged — callers depend on that hostname.
 
 A stateless, single-binary Rust HTTP service that answers *"does this string contain a banned word?"* across many languages, backed by `aho-corasick` automatons built from the LDNOOBW list. The entire list is compiled into the binary at build time; there is no hot reload, no database, no external state. The image tag is the list version.
 

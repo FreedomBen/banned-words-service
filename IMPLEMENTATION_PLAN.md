@@ -209,7 +209,7 @@ banned-words-service/
 1. Fresh clone + `make podman` reproduces an identical image (modulo timestamps).
 2. Load test report attached to the release notes.
 3. `X-List-Version` in every response matches the git tag's submodule SHA.
-4. Tag `v1.0.0`; cut image `ghcr.io/.../banned-words-service:v1.0.0` and `:$LIST_SHA` — once CLI CM5 lands, `.github/workflows/release.yml` automates both this and the `vv` musl binary upload on tag push.
+4. Tag `v1.0.0`; cut image `ghcr.io/.../vocab-veto:v1.0.0` and `:$LIST_SHA` — once CLI CM5 lands, `.github/workflows/release.yml` automates both this and the `vv` musl binary upload on tag push.
 
 ## Out of scope (tracked, not built)
 

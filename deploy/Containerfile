@@ -61,7 +61,7 @@ RUN cargo build \
 FROM ${DISTROLESS_IMAGE} AS runtime
 ARG LIST_VERSION=unknown
 ARG REVISION=unknown
-LABEL org.opencontainers.image.title="banned-words-service" \
+LABEL org.opencontainers.image.title="vocab-veto" \
       org.opencontainers.image.description="Vocab Veto — stateless multi-language banned-words HTTP service" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words" \

@@ -12,7 +12,7 @@
 #   - Pinned image:  `IMAGE_TAG=<ldnoobw-sha> docker compose up`
 
 services:
-  banned-words-service:
+  vocab-veto:
     image: vocab-veto:${IMAGE_TAG:-latest}
     build:
       context: .

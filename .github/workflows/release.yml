@@ -1,7 +1,7 @@
 name: Release
 
 # Triggered on v-prefixed tag pushes. Produces two artifacts:
-#   - `banned-words-service` container image, tagged with the release
+#   - `vocab-veto` container image, tagged with the release
 #     tag and the LDNOOBW submodule SHA; pushed to GHCR.
 #   - `vv` static musl binary for x86_64 Linux, uploaded as a GitHub
 #     release asset on the same tag.

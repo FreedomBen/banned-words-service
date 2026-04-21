@@ -10,7 +10,7 @@ CARGO ?= cargo
 # `make podman CONTAINER=docker` on hosts that ship only Docker.
 CONTAINER ?= podman
 
-IMAGE_NAME ?= banned-words-service
+IMAGE_NAME ?= vocab-veto
 LIST_SHA := $(shell git -C vendor/ldnoobw rev-parse HEAD 2>/dev/null)
 REVISION := $(shell git rev-parse HEAD 2>/dev/null)
 
