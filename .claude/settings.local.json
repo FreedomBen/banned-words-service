@@ -36,7 +36,8 @@
       "Bash(echo \"exit=$?\")",
       "Bash(rustup target *)",
       "Bash(ldd ./target/x86_64-unknown-linux-musl/release/vv)",
-      "Bash(./target/x86_64-unknown-linux-musl/release/vv check *)"
+      "Bash(./target/x86_64-unknown-linux-musl/release/vv check *)",
+      "Bash(podman --version)"
     ]
   }
 }

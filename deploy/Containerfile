@@ -29,15 +29,26 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 # Dependency-only compile. build.rs runs during cook against our Cargo.toml,
 # so vendor/ldnoobw and the submodule's git metadata must be present.
-COPY Cargo.toml Cargo.lock build.rs ./
+# rust-toolchain.toml pins `channel = "stable"`, which rustup auto-installs
+# here instead of using the `RUST_VERSION`-pinned base image's musl-equipped
+# default; the COPY below gets the pin in scope up front and the `rustup
+# target add` re-installs musl on the resolved toolchain so both cook and
+# build below find the musl std sysroot.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY vendor ./vendor
 COPY .git ./.git
+RUN rustup target add x86_64-unknown-linux-musl
 RUN cargo chef cook \
       --release \
       --locked \
       --target x86_64-unknown-linux-musl \
       --recipe-path recipe.json
-# Real build. Only source changes invalidate this layer.
+# cargo-chef rewrites Cargo.toml to a `version = "0.0.1"` skeleton during
+# cook and does not restore the real manifest. Re-COPY the real one so
+# the final build compiles the crate at its actual version and runs
+# build.rs into the real OUT_DIR (where include!(...generated_terms.rs)
+# expects to find it).
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY benches ./benches
 RUN cargo build \
