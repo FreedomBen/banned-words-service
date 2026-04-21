@@ -1,0 +1,39 @@
+# Local-development compose for Vocab Veto / banned-words-service.
+# The production deployment shape is deploy/k8s/; this file is for host-local
+# smoke tests and is not what the release pipeline consumes.
+#
+# VV_API_KEYS is required; set it in a sibling .env file or in the shell
+# environment. The service is fail-closed and will refuse to start without it.
+#
+# Two modes:
+#   - Local build:   `docker compose up --build`   (or `podman-compose up --build`)
+#   - Pinned image:  `IMAGE_TAG=<ldnoobw-sha> docker compose up`
+
+services:
+  banned-words-service:
+    image: banned-words-service:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: deploy/Containerfile
+    container_name: vocab-veto
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      VV_API_KEYS: ${VV_API_KEYS:?VV_API_KEYS must be set (comma-separated bearer keys, >=32 bytes each)}
+      VV_LISTEN_ADDR: ${VV_LISTEN_ADDR:-0.0.0.0:8080}
+      VV_MAX_INFLIGHT: ${VV_MAX_INFLIGHT:-1024}
+      # VV_LANGS: "en,es,fr"        # optional runtime allowlist
+      # VV_HISTOGRAM_BUCKETS: "..." # optional latency-bucket override
+    # Mirrors the pod securityContext in deploy/k8s/deployment.yaml. The
+    # binary writes nothing to disk (logs go to stdout, list is compiled
+    # in), so read_only holds without a tmpfs mount.
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # No HEALTHCHECK: the distroless/static base has no shell or curl and
+    # the binary has no self-probe subcommand. /healthz and /readyz are
+    # exposed on the service port for external probes to consume.
