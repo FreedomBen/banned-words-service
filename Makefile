@@ -14,6 +14,12 @@ IMAGE_NAME ?= vocab-veto
 LIST_SHA := $(shell git -C vendor/ldnoobw rev-parse HEAD 2>/dev/null)
 REVISION := $(shell git rev-parse HEAD 2>/dev/null)
 
+# Remote registry path (without tag) for `make podman-push`. No sensible
+# default — override per host, e.g.
+#   make podman-push REMOTE_IMAGE=ghcr.io/freedomben/vocab-veto
+# GHCR requires the namespace be lowercase.
+REMOTE_IMAGE ?=
+
 # Pinned dev-tool versions. `install-tools` installs each via
 # `cargo install --locked --version $(VERSION) <crate>`, so rebuilds on
 # a fresh host resolve to the same source (Cargo.lock is consulted) and
@@ -26,7 +32,7 @@ DEV_API_KEY ?= dev-key-do-not-use-in-production-0000000000000000
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test bench lint podman run release-check install-tools vv vv-static install
+.PHONY: help build test bench lint podman podman-push run release-check install-tools vv vv-static install
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; print "Vocab Veto — make targets\n"} \
@@ -34,6 +40,7 @@ help: ## Show this help
 	@echo ""
 	@echo "  CONTAINER=$(CONTAINER) (override with CONTAINER=docker)"
 	@echo "  PREFIX=$(PREFIX) (override with PREFIX=/path for make install)"
+	@echo "  REMOTE_IMAGE=$(REMOTE_IMAGE) (required for podman-push, e.g. ghcr.io/owner/vocab-veto)"
 	@echo ""
 	@echo "  One-shot setup for vv-static: rustup target add x86_64-unknown-linux-musl"
 	@echo "    plus a musl linker — 'musl-tools' on Debian/Ubuntu, 'musl-gcc' on Fedora."
@@ -74,6 +81,18 @@ podman: ## Build the container image (rootless podman; see footer for override),
 	  -t $(IMAGE_NAME):$(LIST_SHA) \
 	  -t $(IMAGE_NAME):latest \
 	  .
+
+podman-push: podman ## Push the built image to REMOTE_IMAGE (e.g. REMOTE_IMAGE=ghcr.io/owner/vocab-veto); pushes both :LIST_SHA and :latest
+	@if [ -z "$(REMOTE_IMAGE)" ]; then \
+	  echo "error: REMOTE_IMAGE is not set." >&2; \
+	  echo "  example: make podman-push REMOTE_IMAGE=ghcr.io/owner/vocab-veto" >&2; \
+	  echo "  GHCR requires the namespace be lowercase." >&2; \
+	  exit 1; \
+	fi
+	$(CONTAINER) tag $(IMAGE_NAME):$(LIST_SHA) $(REMOTE_IMAGE):$(LIST_SHA)
+	$(CONTAINER) tag $(IMAGE_NAME):latest $(REMOTE_IMAGE):latest
+	$(CONTAINER) push $(REMOTE_IMAGE):$(LIST_SHA)
+	$(CONTAINER) push $(REMOTE_IMAGE):latest
 
 run: ## Run locally via cargo run with a dev-only VV_API_KEYS
 	VV_API_KEYS="$(DEV_API_KEY)" $(CARGO) run --release --locked
